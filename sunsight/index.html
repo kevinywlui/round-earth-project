@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Sunsight — calculate solar declination for any date and time." />
+  <meta property="og:title" content="Sunsight" />
+  <meta property="og:description" content="Solar declination calculator" />
+  <title>Sunsight</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #0a0a12;
+      --surface:      #13131f;
+      --border:       #222235;
+      --text:         #e8e8f0;
+      --muted:        #888;
+      --accent:       #f5c842;
+      --input-bg:     #0a0a12;
+      --eq-line:      #2a2a40;
+      --focus-shadow: rgba(245, 200, 66, 0.25);
+
+      --formula-base: #888;
+      --formula-span: #bbb;
+    }
+
+    [data-theme="light"] {
+      --bg:           #f5f5ee;
+      --surface:      #ffffff;
+      --border:       #ddddd0;
+      --text:         #1a1a24;
+      --muted:        #636363;
+      --accent:       #c4920a;
+      --input-bg:     #f5f5ee;
+      --eq-line:      #e0e0d8;
+      --focus-shadow: rgba(196, 146, 10, 0.25);
+
+      --formula-base: #636363;
+      --formula-span: #444;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) {
+        --bg:           #f5f5ee;
+        --surface:      #ffffff;
+        --border:       #ddddd0;
+        --text:         #1a1a24;
+        --muted:        #636363;
+        --accent:       #c4920a;
+        --input-bg:     #f5f5ee;
+        --eq-line:      #e0e0d8;
+        --focus-shadow: rgba(196, 146, 10, 0.25);
+
+        --formula-base: #636363;
+        --formula-span: #444;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, body { transition: none !important; }
+    }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    @media (max-width: 480px) {
+      body { padding: 1rem; }
+    }
+
+    .top-row {
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      margin-bottom: 0.25rem;
+    }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 300;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .theme-toggle {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 2rem;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      letter-spacing: 0.08em;
+      padding: 0.25rem 0.75rem;
+      transition: border-color 0.2s, color 0.2s;
+    }
+
+    .theme-toggle:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .theme-toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .subtitle {
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      text-transform: uppercase;
+      margin-bottom: 3rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 2.5rem 3rem;
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      flex-direction: column;
+      gap: 2rem;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    @media (max-width: 480px) {
+      .card { padding: 1.5rem; }
+    }
+
+    .date-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    label {
+      font-size: 0.75rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .date-input-row {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    input[type="datetime-local"] {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      color: var(--text);
+      font-size: 1rem;
+      padding: 0.6rem 0.9rem;
+      flex: 1;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+    }
+
+    input[type="datetime-local"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--focus-shadow);
+    }
+
+    input[type="datetime-local"][aria-invalid="true"] {
+      border-color: #e05050;
+    }
+
+    .now-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      letter-spacing: 0.06em;
+      padding: 0.6rem 0.8rem;
+      white-space: nowrap;
+      transition: border-color 0.2s, color 0.2s;
+    }
+
+    .now-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .now-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .result-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.25rem;
+    }
+
+    .result-box {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.25rem 1rem;
+      text-align: center;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .result-box .val {
+      font-size: 2rem;
+      font-weight: 600;
+      color: var(--accent);
+      line-height: 1;
+      margin-bottom: 0.4rem;
+    }
+
+    .result-box .unit {
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    figure {
+      margin: 0;
+    }
+
+    figcaption {
+      font-size: 0.7rem;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 0.4rem;
+      letter-spacing: 0.04em;
+    }
+
+    #graph:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 6px;
+    }
+
+    .formula {
+      font-size: 0.7rem;
+      color: var(--formula-base);
+      text-align: center;
+      letter-spacing: 0.04em;
+      line-height: 1.7;
+    }
+
+    .formula span {
+      color: var(--formula-span);
+    }
+
+    svg text { font-family: system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+
+<div class="top-row">
+  <h1>Sunsight</h1>
+  <button class="theme-toggle" id="themeToggle">☀ Light</button>
+</div>
+<p class="subtitle">Solar Declination Calculator</p>
+
+<div class="card">
+  <div class="date-row">
+    <label for="dateInput">Date and time</label>
+    <div class="date-input-row">
+      <input type="datetime-local" id="dateInput" />
+      <button class="now-btn" id="nowBtn">Now</button>
+    </div>
+  </div>
+
+  <div class="result-grid">
+    <div class="result-box" aria-live="polite" aria-atomic="true">
+      <div class="val" id="decVal">—</div>
+      <div class="unit">Declination (°)</div>
+    </div>
+    <div class="result-box" aria-live="polite" aria-atomic="true">
+      <div class="val" id="daysVal">—</div>
+      <div class="unit">Days since vernal equinox</div>
+    </div>
+  </div>
+
+  <figure>
+    <svg id="graph" viewBox="0 0 440 200" style="width:100%;display:block;cursor:crosshair;"
+         tabindex="0" role="application" aria-label="Solar declination graph"></svg>
+    <figcaption>Hover or click to explore · Arrow keys step by day</figcaption>
+  </figure>
+
+  <div class="formula" id="formulaLine"></div>
+</div>
+
+<script>
+  const OBLIQUITY_DEG  = 23.4393;
+  const OBLIQUITY      = OBLIQUITY_DEG * Math.PI / 180;
+  const TROPICAL_YEAR  = 365.25;
+  const C              = Math.sin(OBLIQUITY);
+  const EQUINOX_EPOCH  = Date.parse('2026-03-20T14:46:00Z');
+  const MONTHS         = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  function daysSinceEquinox(date) {
+    const ms = date.getTime() - EQUINOX_EPOCH;
+    const d  = ms / 86400000;
+    return ((d % TROPICAL_YEAR) + TROPICAL_YEAR) % TROPICAL_YEAR;
+  }
+
+  function declination(d) {
+    return Math.asin(C * Math.sin((d / TROPICAL_YEAR) * 2 * Math.PI));
+  }
+
+  function getCSSVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function makeSVGEl(tag, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+  }
+
+  let graphParams = null;
+  let xhairEl = null, vlineEl = null, dotEl = null, ttBgEl = null, ttDateEl = null, ttDecEl = null;
+
+  function getSVGX(svg, clientX) {
+    const rect = svg.getBoundingClientRect();
+    return (clientX - rect.left) / rect.width * svg.viewBox.baseVal.width;
+  }
+
+  function updateCrosshair(svgX) {
+    if (!graphParams || !xhairEl) return;
+    const { padL, padT, plotW, plotH, year, daysInYear, yMin, yMax } = graphParams;
+
+    const clampedX  = Math.max(padL, Math.min(padL + plotW, svgX));
+    const dayOfYear = Math.min(Math.round((clampedX - padL) / plotW * daysInYear), daysInYear - 1);
+    const hoverDate = new Date(year, 0, 1 + dayOfYear, 12, 0, 0);
+    const dec       = declination(daysSinceEquinox(hoverDate)) * 180 / Math.PI;
+    const dotY      = padT + plotH * (1 - (dec - yMin) / (yMax - yMin));
+
+    vlineEl.setAttribute('x1', clampedX); vlineEl.setAttribute('x2', clampedX);
+    dotEl.setAttribute('cx', clampedX);   dotEl.setAttribute('cy', dotY);
+
+    ttDateEl.textContent = `${MONTHS[hoverDate.getMonth()]} ${hoverDate.getDate()}`;
+    ttDecEl.textContent  = `δ = ${dec >= 0 ? '+' : ''}${dec.toFixed(1)}°`;
+
+    const ttW = 74, ttH = 34, p = 6;
+    const ttX = clampedX > padL + plotW / 2 ? clampedX - ttW - 8 : clampedX + 8;
+    const ttY = Math.max(padT + 2, Math.min(padT + plotH - ttH - 2, dotY - ttH / 2));
+
+    ttBgEl.setAttribute('x', ttX);        ttBgEl.setAttribute('y', ttY);
+    ttBgEl.setAttribute('width', ttW);    ttBgEl.setAttribute('height', ttH);
+    ttDateEl.setAttribute('x', ttX + p);  ttDateEl.setAttribute('y', ttY + p + 9);
+    ttDecEl.setAttribute('x',  ttX + p);  ttDecEl.setAttribute('y',  ttY + p + 23);
+
+    xhairEl.setAttribute('visibility', 'visible');
+  }
+
+  function drawGraph(date) {
+    const svg = document.getElementById('graph');
+    const ns  = makeSVGEl;
+
+    const W = 440, H = 200;
+    const padL = 42, padR = 16, padT = 16, padB = 32;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    const year       = date.getFullYear();
+    const daysInYear = ((year % 4 === 0 && year % 100 !== 0) || year % 400 === 0) ? 366 : 365;
+    const yMin = -26, yMax = 26;
+
+    graphParams = { padL, padT, plotW, plotH, W, H, year, daysInYear, yMin, yMax };
+
+    function xOf(dayOfYear) { return padL + (dayOfYear / daysInYear) * plotW; }
+    function yOf(deg)       { return padT + plotH * (1 - (deg - yMin) / (yMax - yMin)); }
+
+    const colGrid    = getCSSVar('--eq-line');
+    const colBorder  = getCSSVar('--border');
+    const colMuted   = getCSSVar('--muted');
+    const colAcc     = getCSSVar('--accent');
+    const colSurface = getCSSVar('--surface');
+
+    const nodes = [];
+
+    nodes.push(ns('rect', { x: padL, y: padT, width: plotW, height: plotH, fill: colSurface, rx: '6' }));
+
+    for (const deg of [-OBLIQUITY_DEG, 0, OBLIQUITY_DEG]) {
+      const y = yOf(deg);
+      nodes.push(ns('line', {
+        x1: padL, y1: y, x2: padL + plotW, y2: y,
+        stroke: colGrid, 'stroke-width': '1',
+        ...(deg !== 0 ? { 'stroke-dasharray': '4 3' } : {}),
+      }));
+      const lbl = ns('text', { x: padL - 5, y: y + 4, 'text-anchor': 'end', fill: colMuted, 'font-size': '9' });
+      lbl.textContent = (deg > 0 ? '+' : '') + deg.toFixed(0) + '°';
+      nodes.push(lbl);
+    }
+
+    const jan1 = new Date(year, 0, 1);
+    for (let m = 0; m < 12; m++) {
+      const dayOfMonth = Math.round((new Date(year, m, 1) - jan1) / 86400000);
+      nodes.push(ns('line', { x1: xOf(dayOfMonth), y1: padT + plotH, x2: xOf(dayOfMonth), y2: padT + plotH + 4, stroke: colMuted, 'stroke-width': '1' }));
+
+      const midDay = Math.round((new Date(year, m, 15) - jan1) / 86400000);
+      const lbl = ns('text', { x: xOf(midDay), y: padT + plotH + 16, 'text-anchor': 'middle', fill: colMuted, 'font-size': '9' });
+      lbl.textContent = MONTHS[m];
+      nodes.push(lbl);
+    }
+
+    nodes.push(ns('rect', { x: padL, y: padT, width: plotW, height: plotH, fill: 'none', stroke: colBorder, 'stroke-width': '1', rx: '6' }));
+
+    const points = [];
+    for (let day = 0; day < daysInYear; day++) {
+      const d   = new Date(year, 0, 1 + day, 12, 0, 0);
+      const dec = declination(daysSinceEquinox(d)) * 180 / Math.PI;
+      points.push(`${xOf(day).toFixed(1)},${yOf(dec).toFixed(1)}`);
+    }
+    nodes.push(ns('polyline', {
+      points: points.join(' '),
+      fill: 'none', stroke: colAcc, 'stroke-width': '1.5', 'stroke-linejoin': 'round', opacity: '0.85',
+    }));
+
+    const currentDayOfYear = (date - jan1) / 86400000;
+    const currentDec = declination(daysSinceEquinox(date)) * 180 / Math.PI;
+    const mx = xOf(currentDayOfYear), my = yOf(currentDec);
+    nodes.push(ns('line', { x1: mx, y1: padT, x2: mx, y2: padT + plotH, stroke: colAcc, 'stroke-width': '1', opacity: '0.35' }));
+    nodes.push(ns('circle', { cx: mx, cy: my, r: 4, fill: colAcc }));
+
+    const yearLbl = ns('text', { x: padL + plotW - 4, y: padT + plotH - 6, 'text-anchor': 'end', fill: colMuted, 'font-size': '9' });
+    yearLbl.textContent = year;
+    nodes.push(yearLbl);
+
+    const xhair  = ns('g', { id: 'graph-crosshair', visibility: 'hidden', 'pointer-events': 'none' });
+    const vline  = ns('line',   { id: 'xhair-vline', x1: 0, y1: padT, x2: 0, y2: padT + plotH, stroke: colMuted, 'stroke-width': '1', 'stroke-dasharray': '3 2' });
+    const dot    = ns('circle', { id: 'xhair-dot',  r: '4', fill: colAcc });
+    const ttBg   = ns('rect',   { id: 'xhair-bg',   rx: '4', fill: colSurface, stroke: colBorder, 'stroke-width': '1' });
+    const ttDate = ns('text',   { id: 'xhair-date', 'font-size': '10', fill: colMuted });
+    const ttDec  = ns('text',   { id: 'xhair-dec',  'font-size': '10', fill: colAcc });
+    xhair.append(vline, dot, ttBg, ttDate, ttDec);
+    nodes.push(xhair);
+    nodes.push(ns('rect', { x: padL, y: padT, width: plotW, height: plotH, fill: 'transparent', 'pointer-events': 'all' }));
+
+    svg.replaceChildren(...nodes);
+
+    xhairEl  = xhair; vlineEl  = vline; dotEl    = dot;
+    ttBgEl   = ttBg;  ttDateEl = ttDate; ttDecEl  = ttDec;
+
+    svg.setAttribute('aria-label', `Solar declination graph for ${year}`);
+  }
+
+  let currentDate = new Date();
+
+  function updateURL(date) {
+    history.replaceState(null, '', '?' + new URLSearchParams({ t: date.toISOString() }));
+  }
+
+  function update(date) {
+    currentDate = date;
+    const d      = daysSinceEquinox(date);
+    const decRad = declination(d);
+    const decDeg = decRad * 180 / Math.PI;
+
+    document.getElementById('decVal').textContent  = decDeg.toFixed(2) + '°';
+    document.getElementById('daysVal').textContent = d.toFixed(2);
+
+    drawGraph(date);
+
+    const dSpan  = Object.assign(document.createElement('span'), { textContent: d.toFixed(2) });
+    const eqSpan = Object.assign(document.createElement('span'), { textContent: decDeg.toFixed(2) + '°' });
+    document.getElementById('formulaLine').replaceChildren(
+      `δ = arcsin( sin(${OBLIQUITY_DEG}°) · sin( 2π · `, dSpan,
+      ` / ${TROPICAL_YEAR} ) ) = `, eqSpan,
+    );
+
+    updateURL(date);
+  }
+
+  const toggle = document.getElementById('themeToggle');
+  const root   = document.documentElement;
+
+  function currentEffectiveTheme() {
+    if (root.dataset.theme) return root.dataset.theme;
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+
+  function applyTheme(theme) {
+    root.dataset.theme = theme;
+    toggle.textContent = theme === 'dark' ? '☀ Light' : '☾ Dark';
+    toggle.setAttribute('aria-label', theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+    update(currentDate);
+  }
+
+  toggle.addEventListener('click', () => {
+    applyTheme(currentEffectiveTheme() === 'dark' ? 'light' : 'dark');
+  });
+
+  const input = document.getElementById('dateInput');
+
+  function toLocalDateTimeString(date) {
+    const y  = date.getFullYear();
+    const mo = String(date.getMonth() + 1).padStart(2, '0');
+    const d  = String(date.getDate()).padStart(2, '0');
+    const h  = String(date.getHours()).padStart(2, '0');
+    const mi = String(date.getMinutes()).padStart(2, '0');
+    return `${y}-${mo}-${d}T${h}:${mi}`;
+  }
+
+  input.addEventListener('change', () => {
+    const date = new Date(input.value);
+    if (isNaN(date.getTime())) {
+      input.setAttribute('aria-invalid', 'true');
+    } else {
+      input.removeAttribute('aria-invalid');
+      update(date);
+    }
+  });
+
+  document.getElementById('nowBtn').addEventListener('click', () => {
+    const now = new Date();
+    input.value = toLocalDateTimeString(now);
+    input.removeAttribute('aria-invalid');
+    update(now);
+  });
+
+  const graphSVG = document.getElementById('graph');
+
+  graphSVG.addEventListener('mousemove', (e) => {
+    updateCrosshair(getSVGX(graphSVG, e.clientX));
+  });
+
+  graphSVG.addEventListener('mouseleave', () => {
+    if (xhairEl) xhairEl.setAttribute('visibility', 'hidden');
+  });
+
+  graphSVG.addEventListener('click', (e) => {
+    if (!graphParams) return;
+    const { padL, plotW, daysInYear, year } = graphParams;
+    const clampedX  = Math.max(padL, Math.min(padL + plotW, getSVGX(graphSVG, e.clientX)));
+    const dayOfYear = Math.min(Math.round((clampedX - padL) / plotW * daysInYear), daysInYear - 1);
+    const clicked   = new Date(year, 0, 1 + dayOfYear, currentDate.getHours(), currentDate.getMinutes(), 0);
+    input.value = toLocalDateTimeString(clicked);
+    update(clicked);
+  });
+
+  graphSVG.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+  }, { passive: false });
+
+  graphSVG.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    updateCrosshair(getSVGX(graphSVG, e.touches[0].clientX));
+  }, { passive: false });
+
+  graphSVG.addEventListener('touchend', (e) => {
+    if (!graphParams) return;
+    const { padL, plotW, daysInYear, year } = graphParams;
+    const clampedX  = Math.max(padL, Math.min(padL + plotW, getSVGX(graphSVG, e.changedTouches[0].clientX)));
+    const dayOfYear = Math.min(Math.round((clampedX - padL) / plotW * daysInYear), daysInYear - 1);
+    const touched   = new Date(year, 0, 1 + dayOfYear, currentDate.getHours(), currentDate.getMinutes(), 0);
+    input.value = toLocalDateTimeString(touched);
+    update(touched);
+  });
+
+  graphSVG.addEventListener('keydown', (e) => {
+    if (!graphParams || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+    e.preventDefault();
+    const next = new Date(currentDate.getTime() + (e.key === 'ArrowRight' ? 1 : -1) * 86400000);
+    input.value = toLocalDateTimeString(next);
+    update(next);
+    const { padL, plotW, daysInYear, year } = graphParams;
+    const dayOfYear = (next - new Date(year, 0, 1)) / 86400000;
+    updateCrosshair(padL + (dayOfYear / daysInYear) * plotW);
+  });
+
+  // Init — read URL param, set currentDate before applyTheme calls update()
+  const urlParams = new URLSearchParams(location.search);
+  const tParam    = urlParams.get('t');
+  const initDate  = tParam ? new Date(tParam) : new Date();
+  const startDate = isNaN(initDate.getTime()) ? new Date() : initDate;
+
+  currentDate = startDate;
+  input.value = toLocalDateTimeString(startDate);
+  applyTheme(currentEffectiveTheme());
+</script>
+
+</body>
+</html>
