@@ -1,0 +1,31 @@
+# Build outputs
+build/
+app/build/
+
+# Gradle
+.gradle/
+
+# Local configuration (SDK path, signing config)
+local.properties
+
+# IntelliJ/Android Studio — regenerated or machine-specific
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/assetWizardSettings.xml
+.idea/dictionaries/
+.idea/libraries/
+.idea/caches/
+.idea/androidTestRunConfiguration.xml
+.idea/deploymentTargetSelector.xml
+.idea/deviceManager.xml
+.idea/migrations.xml
+
+# Kotlin daemon sessions
+.kotlin/
+
+# Heap dumps
+*.hprof
+
+# Claude Code local settings
+.claude/
