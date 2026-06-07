@@ -26,7 +26,6 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
-import kotlin.math.abs
 
 /**
  * Connects to a CSC (Cycling Speed and Cadence) sensor over BLE, subscribes to
@@ -42,6 +41,8 @@ class CscBleDataSource(
     private val wheelCircumferenceM: () -> Double,
     /** Current compass heading in degrees [0, 360); read fresh on each revolution. */
     private val heading: () -> Float = { 0f },
+    /** Current magnetic declination in degrees (positive east); read fresh per use. */
+    private val declination: () -> Float = { 0f },
 ) : BikeDataSource {
 
     private val scope = CoroutineScope(SupervisorJob())
@@ -51,7 +52,7 @@ class CscBleDataSource(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
 
-    private val _data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0.0))
+    private val _data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0f, 0.0))
     override val data: StateFlow<RawBikeData> = _data
 
     // Unlimited buffer so no revolution is ever dropped — the recorded stream
@@ -205,6 +206,7 @@ class CscBleDataSource(
         val now = System.currentTimeMillis()
         val circumference = wheelCircumferenceM()
         val headingDeg = heading()
+        val trueHeadingDeg = trueFromMagnetic(headingDeg, declination())
 
         _readings.trySend(
             WheelRevolutionReading(
@@ -213,6 +215,7 @@ class CscBleDataSource(
                 sensorEventTime1024 = eventTime,
                 wheelCircumferenceM = circumference,
                 headingDegrees = headingDeg,
+                trueHeadingDegrees = trueHeadingDeg,
             )
         )
 
@@ -227,6 +230,7 @@ class CscBleDataSource(
                     speedKph = speedMs * 3.6,
                     cadenceRpm = deltaRevs / deltaSec * 60.0,
                     bearingDegrees = headingDeg,
+                    trueBearingDegrees = trueHeadingDeg,
                     odometerKm = revs * circumference / 1000.0,
                 )
             }
@@ -234,6 +238,7 @@ class CscBleDataSource(
             _data.update {
                 it.copy(
                     bearingDegrees = headingDeg,
+                    trueBearingDegrees = trueHeadingDeg,
                     odometerKm = revs * circumference / 1000.0,
                 )
             }
@@ -269,12 +274,15 @@ class CscBleDataSource(
         headingJob = scope.launch {
             while (true) {
                 val h = heading()
+                val t = trueFromMagnetic(h, declination())
                 // Atomic compare-and-set; ignore sub-degree sensor jitter so a
                 // stationary phone produces no churn. Returning the same instance
                 // skips the emission (StateFlow dedups equal values).
                 _data.update {
-                    if (abs(it.bearingDegrees - h) < HEADING_EPSILON_DEG) it
-                    else it.copy(bearingDegrees = h)
+                    if (angularDistance(it.bearingDegrees, h) < HEADING_EPSILON_DEG &&
+                        angularDistance(it.trueBearingDegrees, t) < HEADING_EPSILON_DEG
+                    ) it
+                    else it.copy(bearingDegrees = h, trueBearingDegrees = t)
                 }
                 delay(250)
             }

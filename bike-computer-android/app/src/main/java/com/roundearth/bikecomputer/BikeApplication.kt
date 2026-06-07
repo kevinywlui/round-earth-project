@@ -22,6 +22,9 @@ class BikeApplication : Application() {
     // Latest wheel circumference, kept hot so the BLE source can read it synchronously.
     @Volatile private var circumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE
 
+    // Latest magnetic declination, kept hot so the data source can read it synchronously.
+    @Volatile private var declinationDeg: Float = PreferencesStore.DEFAULT_DECLINATION.toFloat()
+
     private val headingProvider: HeadingProvider by lazy { HeadingProvider(this) }
 
     /** True when the real BLE source is in use (and BLE runtime permissions are needed). */
@@ -32,9 +35,9 @@ class BikeApplication : Application() {
         // Emulators have no BLE radio — fall back to simulated data so the app is
         // usable without hardware. Real devices use the CSC sensor.
         val source: BikeDataSource = if (isEmulator()) {
-            SimulatedBikeDataSource { circumferenceM }
+            SimulatedBikeDataSource({ circumferenceM }, { declinationDeg })
         } else {
-            CscBleDataSource(this, { circumferenceM }, { headingProvider.degrees })
+            CscBleDataSource(this, { circumferenceM }, { headingProvider.degrees }, { declinationDeg })
         }
         BikeRepository(source, prefs, db.revolutionEventDao(), appScope)
     }
@@ -53,6 +56,9 @@ class BikeApplication : Application() {
         if (!isEmulator()) headingProvider.start()
         appScope.launch {
             prefs.wheelCircumferenceMeters.collect { circumferenceM = it }
+        }
+        appScope.launch {
+            prefs.magneticDeclinationDeg.collect { declinationDeg = it.toFloat() }
         }
     }
 }

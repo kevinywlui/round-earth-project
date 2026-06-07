@@ -99,27 +99,62 @@ private fun TopBar(onSettingsClick: () -> Unit) {
 
 @Composable
 private fun BearingRow(state: BikeUiState) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CompassCell(
+            label = "TRUE",
+            bearingDegrees = state.trueBearingDegrees,
+            cardinal = state.trueBearingCardinal,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .background(Divider),
+        )
+        CompassCell(
+            label = "MAGNETIC",
+            bearingDegrees = state.bearingDegrees,
+            cardinal = state.bearingCardinal,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun CompassCell(
+    label: String,
+    bearingDegrees: Float,
+    cardinal: String,
+    modifier: Modifier = Modifier,
+) {
     val animatedBearing by animateFloatAsState(
-        targetValue = state.bearingDegrees,
+        targetValue = bearingDegrees,
         animationSpec = tween(durationMillis = 900),
-        label = "bearing",
+        label = "bearing-$label",
     )
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         CompassNeedle(bearingDegrees = animatedBearing, modifier = Modifier.size(36.dp))
-        Spacer(Modifier.width(14.dp))
+        Spacer(Modifier.width(12.dp))
         Column {
             Text(
-                text = "%03.0f°  %s".format(state.bearingDegrees, state.bearingCardinal),
+                text = "%03.0f°  %s".format(bearingDegrees, cardinal),
                 color = TextPrimary,
-                fontSize = 26.sp,
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Light,
             )
-            Text(text = "BEARING", color = TextSecondary, fontSize = 10.sp, letterSpacing = 1.sp)
+            Text(text = label, color = TextSecondary, fontSize = 10.sp, letterSpacing = 1.sp)
         }
     }
 }
