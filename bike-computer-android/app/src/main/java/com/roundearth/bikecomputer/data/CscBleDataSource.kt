@@ -95,11 +95,22 @@ class CscBleDataSource(
     @Volatile private var pairedAddresses: Set<String> = emptySet()
     private var scanning = false
 
-    // Merged live state across all connected sensors.
+    // Merged live state across all connected sensors. Multiple GATT callbacks run on
+    // binder threads, so every read-modify-write of this state is guarded by [stateLock]
+    // (a plain volatile `+=` would lose updates under concurrent sensors).
+    private val stateLock = Any()
     @Volatile private var speedKph = 0.0
     @Volatile private var cadenceRpm = 0.0
     @Volatile private var odometerM = 0.0
     @Volatile private var lastActivityAt = 0L
+    // Distance is tracked per sensor (keyed by address) and summed, so each sensor's
+    // contribution is well-defined; `odometerSeedM` carries distance from a resumed ride.
+    private val odometerByAddress = HashMap<String, Double>() // guarded by stateLock
+    private var odometerSeedM = 0.0                           // guarded by stateLock
+
+    private fun recomputeOdometerLocked() {
+        odometerM = odometerSeedM + odometerByAddress.values.sum()
+    }
 
     private val devices = ConcurrentHashMap<String, BluetoothDevice>()      // address -> last seen device
     private val seen = ConcurrentHashMap<String, DiscoveredSensor>()        // address -> UI model
@@ -190,12 +201,22 @@ class CscBleDataSource(
     }
 
     private fun connectIfNeeded(address: String) {
-        if (connections.containsKey(address)) return
         val device = devices[address] ?: return
         val conn = SensorConnection(address)
-        connections[address] = conn
+        // Claim the slot atomically so a concurrent scan callback + paired-flow
+        // emission can't both open a GATT client (which would leak one).
+        if (connections.putIfAbsent(address, conn) != null) return
         Log.i(TAG, "connecting to $address")
-        conn.gatt = device.connectGatt(context, false, conn)
+        val gatt = device.connectGatt(context, false, conn)
+        if (gatt == null) {
+            // connectGatt can return null (BT briefly unavailable, GATT client limit,
+            // stale handle). Don't leave a zombie entry that blocks every reconnect —
+            // drop it so the next scan result retries.
+            Log.w(TAG, "connectGatt returned null for $address; will retry on next scan")
+            connections.remove(address, conn)
+            return
+        }
+        conn.gatt = gatt
     }
 
     private fun disconnect(address: String) {
@@ -223,6 +244,14 @@ class CscBleDataSource(
         }
     }
 
+    override fun seedOdometer(meters: Double) {
+        synchronized(stateLock) {
+            odometerSeedM = meters
+            recomputeOdometerLocked()
+        }
+        emitData()
+    }
+
     private fun emitData() {
         val h = heading()
         val t = trueFromMagnetic(h, declination())
@@ -241,12 +270,15 @@ class CscBleDataSource(
         staleJob = scope.launch {
             while (true) {
                 delay(1_000)
-                val idle = SystemClock.elapsedRealtime() - lastActivityAt
-                if (lastActivityAt > 0 && idle > STALE_MS && (speedKph != 0.0 || cadenceRpm != 0.0)) {
-                    speedKph = 0.0
-                    cadenceRpm = 0.0
-                    _data.update { it.copy(speedKph = 0.0, cadenceRpm = 0.0) }
+                val zeroed = synchronized(stateLock) {
+                    val idle = SystemClock.elapsedRealtime() - lastActivityAt
+                    if (lastActivityAt > 0 && idle > STALE_MS && (speedKph != 0.0 || cadenceRpm != 0.0)) {
+                        speedKph = 0.0
+                        cadenceRpm = 0.0
+                        true
+                    } else false
                 }
+                if (zeroed) _data.update { it.copy(speedKph = 0.0, cadenceRpm = 0.0) }
             }
         }
     }
@@ -291,10 +323,14 @@ class CscBleDataSource(
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.w(TAG, "disconnected $address (status=$status)")
                     g.close()
-                    connections.remove(address)
                     ready = false
-                    // Continuous scanning will rediscover and reconnect if still paired.
-                    markConnected(address, false)
+                    // Only evict the map entry if it is still THIS connection: after a
+                    // fast flap a newer SensorConnection may already own the slot, and a
+                    // late callback for the old GATT must not remove the live one.
+                    if (connections.remove(address, this)) {
+                        // Continuous scanning will rediscover and reconnect if still paired.
+                        markConnected(address, false)
+                    }
                 }
             }
         }
@@ -318,6 +354,13 @@ class CscBleDataSource(
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                // Subscription failed: notifications will never arrive, so don't report a
+                // false "CONNECTED". Disconnect to drop into the rescan/reconnect path.
+                Log.e(TAG, "CCCD write failed for $address (status=$status); disconnecting")
+                g.disconnect()
+                return
+            }
             ready = true
             markConnected(address, true)
             Log.i(TAG, "subscribed to $address")
@@ -337,7 +380,7 @@ class CscBleDataSource(
         private fun handleMeasurement(bytes: ByteArray?) {
             if (bytes == null || bytes.isEmpty()) return
             val circumference = wheelCircumferenceM()
-            val result = decoder.decode(bytes, circumference)
+            val result = decoder.decode(bytes, circumference, SystemClock.elapsedRealtime())
 
             // Persist every wheel revolution losslessly for the time-series.
             result.wheelCumulativeRevs?.let { revs ->
@@ -346,6 +389,7 @@ class CscBleDataSource(
                     WheelRevolutionReading(
                         timestampMillis = System.currentTimeMillis(),
                         cumulativeRevolutions = revs,
+                        deltaRevolutions = result.wheelDeltaRevs,
                         sensorEventTime1024 = result.wheelEventTime1024 ?: 0,
                         wheelCircumferenceM = circumference,
                         headingDegrees = h,
@@ -355,16 +399,25 @@ class CscBleDataSource(
             }
 
             var changed = false
-            result.speedKph?.let {
-                speedKph = it
-                odometerM += result.distanceMeters
-                lastActivityAt = SystemClock.elapsedRealtime()
-                changed = true
-            }
-            result.cadenceRpm?.let {
-                cadenceRpm = it
-                lastActivityAt = SystemClock.elapsedRealtime()
-                changed = true
+            synchronized(stateLock) {
+                // Distance comes from the (reliable) cumulative count, so count it even
+                // when speed isn't derivable (event-time delta 0, or a >64 s wrap).
+                if (result.distanceMeters > 0.0) {
+                    odometerByAddress[address] = (odometerByAddress[address] ?: 0.0) + result.distanceMeters
+                    recomputeOdometerLocked()
+                    lastActivityAt = SystemClock.elapsedRealtime()
+                    changed = true
+                }
+                result.speedKph?.let {
+                    speedKph = it
+                    lastActivityAt = SystemClock.elapsedRealtime()
+                    changed = true
+                }
+                result.cadenceRpm?.let {
+                    cadenceRpm = it
+                    lastActivityAt = SystemClock.elapsedRealtime()
+                    changed = true
+                }
             }
             if (changed) emitData()
         }

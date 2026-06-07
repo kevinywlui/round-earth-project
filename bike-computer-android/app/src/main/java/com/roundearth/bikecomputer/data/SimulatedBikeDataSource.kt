@@ -31,6 +31,10 @@ class SimulatedBikeDataSource(
             var bearing = 45f
             var cumulativeRevs = 0L
             var fractionalRevs = 0.0
+            // Accumulate distance incrementally as revolutions are emitted, each at the
+            // circumference then in effect. Recomputing cumulativeRevs × latest circ would
+            // retroactively rescale already-ridden distance when the user changes wheel size.
+            var odometerM = 0.0
 
             while (true) {
                 val circ = wheelCircumferenceM()
@@ -45,11 +49,13 @@ class SimulatedBikeDataSource(
                 val newWhole = fractionalRevs.toLong()
                 while (cumulativeRevs < newWhole) {
                     cumulativeRevs++
+                    odometerM += circ
                     val now = System.currentTimeMillis()
                     _readings.trySend(
                         WheelRevolutionReading(
                             timestampMillis = now,
                             cumulativeRevolutions = cumulativeRevs,
+                            deltaRevolutions = 1,
                             sensorEventTime1024 = ((now * 1024L / 1000L) and 0xFFFF).toInt(),
                             wheelCircumferenceM = circ,
                             headingDegrees = bearing,
@@ -58,13 +64,15 @@ class SimulatedBikeDataSource(
                     )
                 }
 
+                // Cadence is crank RPM, not wheel RPM: divide by a nominal gear ratio so
+                // the simulated value is physically plausible (~85 rpm), not ~170.
                 val wheelRpm = speedMs / circ * 60.0
                 data.value = RawBikeData(
                     speedKph = speedKph,
-                    cadenceRpm = wheelRpm,
+                    cadenceRpm = wheelRpm / NOMINAL_GEAR_RATIO,
                     bearingDegrees = bearing,
                     trueBearingDegrees = trueBearing,
-                    odometerKm = cumulativeRevs * circ / 1000.0,
+                    odometerKm = odometerM / 1000.0,
                 )
 
                 time += 1.0
@@ -76,5 +84,10 @@ class SimulatedBikeDataSource(
     override fun stop() {
         job?.cancel()
         job = null
+    }
+
+    private companion object {
+        // wheel RPM ÷ this ≈ crank cadence; ~2.0 yields a realistic ~85 rpm at cruising speed.
+        const val NOMINAL_GEAR_RATIO = 2.0
     }
 }

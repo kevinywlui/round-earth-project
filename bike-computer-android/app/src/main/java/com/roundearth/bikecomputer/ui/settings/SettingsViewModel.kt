@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class SettingsUiState(
     val wheelCircumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE,
@@ -58,11 +59,13 @@ class SettingsViewModel(
         viewModelScope.launch { prefs.setMagneticDeclination(degrees) }
     }
 
-    /** Builds the CSV off the main thread and hands it back via [onReady] for sharing. */
-    fun exportCsv(onReady: (String) -> Unit) {
+    /** Streams the CSV to [target] off the main thread, then hands the file to [onReady] for sharing. */
+    fun exportCsv(target: File, onReady: (File) -> Unit) {
         viewModelScope.launch {
-            val csv = withContext(Dispatchers.IO) { repository.exportCsv() }
-            onReady(csv)
+            withContext(Dispatchers.IO) {
+                target.bufferedWriter().use { writer -> repository.exportCsvTo(writer) }
+            }
+            onReady(target)
         }
     }
 

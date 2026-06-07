@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [RevolutionEvent::class], version = 3, exportSchema = false)
+@Database(entities = [RevolutionEvent::class], version = 4, exportSchema = false)
 abstract class BikeDatabase : RoomDatabase() {
     abstract fun revolutionEventDao(): RevolutionEventDao
 
@@ -35,12 +35,23 @@ abstract class BikeDatabase : RoomDatabase() {
             }
         }
 
+        // v4: add deltaRevolutions (reboot/rollover-safe per-event advance) so session
+        // totals and distance reconstruction stay correct across sensor counter resets.
+        // Legacy rows default to 0 (their per-event delta is unknown after the fact).
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE revolution_events ADD COLUMN deltaRevolutions INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
+
         fun get(context: Context): BikeDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 BikeDatabase::class.java,
                 "bike.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
         }
     }
 }

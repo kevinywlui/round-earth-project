@@ -19,9 +19,19 @@ BLECharacteristic *measurementChar;
 // Wheel revolutions are a UINT32 per the CSC spec — they "cannot practically roll
 // over during the life of the Sensor," so we accumulate without wrapping.
 volatile uint32_t wheelRevolutions = 0;
-volatile uint16_t lastEventTime = 0;     // 1/1024 sec units, captured in the ISR
-volatile bool pendingNotify = false;     // set by ISR, consumed in loop()
 volatile unsigned long lastTrigger = 0;  // ms of last accepted trigger (debounce)
+
+// Single-producer (ISR) / single-consumer (loop) ring buffer of revolution events.
+// A bare "pendingNotify" flag coalesced bursts: if several revolutions occurred
+// between loop() passes, only the last (revs,time) was ever sent, collapsing the
+// per-revolution time-series the Collector relies on. The buffer captures every
+// accepted edge so loop() can emit one notification per revolution. Size is a power
+// of two so head/tail wrap with a cheap mask.
+#define RB_SIZE 32
+volatile uint32_t rbRevs[RB_SIZE];
+volatile uint16_t rbTime[RB_SIZE];       // 1/1024 sec units, captured in the ISR
+volatile uint8_t  rbHead = 0;            // advanced by the ISR (producer)
+volatile uint8_t  rbTail = 0;            // advanced by loop() (consumer)
 
 // Restart advertising when a client disconnects so the sensor is rediscoverable
 // without a power cycle.
@@ -35,10 +45,17 @@ class ServerCallbacks : public BLEServerCallbacks {
 void IRAM_ATTR onMagnet() {
   unsigned long now = millis();
   if (now - lastTrigger > MIN_MS) {
-    wheelRevolutions++;
-    lastEventTime = (uint16_t)(((uint64_t)now * 1024) / 1000);  // ms → 1/1024 sec (64-bit to avoid overflow)
     lastTrigger = now;
-    pendingNotify = true;
+    wheelRevolutions++;
+    uint16_t eventTime = (uint16_t)(((uint64_t)now * 1024) / 1000);  // ms → 1/1024 sec (64-bit to avoid overflow)
+    // Enqueue this revolution; drop it only if the buffer is full (impossible at
+    // the MIN_MS debounce rate vs. the 10 ms loop), so no revolution is coalesced.
+    uint8_t next = (uint8_t)((rbHead + 1) & (RB_SIZE - 1));
+    if (next != rbTail) {
+      rbRevs[rbHead] = wheelRevolutions;
+      rbTime[rbHead] = eventTime;
+      rbHead = next;
+    }
   }
 }
 
@@ -108,14 +125,12 @@ void setup() {
 }
 
 void loop() {
-  if (pendingNotify) {
-    pendingNotify = false;
-    // Snapshot the ISR-updated values; brief detach guards against a torn read
-    // if a new edge fires between the two volatile loads.
-    noInterrupts();
-    uint32_t revs = wheelRevolutions;
-    uint16_t eventTime = lastEventTime;
-    interrupts();
+  // Drain every buffered revolution, emitting one CSC notification each so a burst
+  // of revolutions between passes is never collapsed into a single packet.
+  while (rbTail != rbHead) {
+    uint32_t revs = rbRevs[rbTail];
+    uint16_t eventTime = rbTime[rbTail];
+    rbTail = (uint8_t)((rbTail + 1) & (RB_SIZE - 1));
 
     notifyCSC(revs, eventTime);
     Serial.print("wheel revs: ");

@@ -122,6 +122,44 @@ class CscMeasurementDecoderTest {
     }
 
     @Test
+    fun distanceIsCountedEvenWhenEventTimeDeltaIsZero() {
+        // A sensor that batches two revs at the same reported event time: dTicks==0
+        // must not lose the traveled distance (speed is simply not derivable).
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 100, time = 5000), circumference)
+        val result = decoder.decode(wheelPacket(revs = 102, time = 5000), circumference)
+
+        assertEquals(2 * 2.0, result.distanceMeters, 1e-9)
+        assertEquals(2L, result.wheelDeltaRevs)
+        assertNull("no speed when the event-time delta is zero", result.speedKph)
+    }
+
+    @Test
+    fun wheelCountRolloverIsCountedNotDropped() {
+        // UInt32 boundary: 0xFFFFFFFF -> 1 is a +2 advance, not a reboot.
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 0xFFFFFFFFL, time = 1000), circumference)
+        val result = decoder.decode(wheelPacket(revs = 1, time = 1512), circumference)
+
+        assertEquals(2L, result.wheelDeltaRevs)
+        assertEquals(2 * 2.0, result.distanceMeters, 1e-9)
+        assertEquals((2 * 2.0) / (512.0 / 1024.0) * 3.6, result.speedKph!!, 1e-6)
+    }
+
+    @Test
+    fun longGapSuppressesSpeedSpikeButStillCountsDistance() {
+        // A 64 s+ stop aliases the 16-bit event time to a tiny dTicks. With the
+        // wall-clock hint, speed must be suppressed but distance still counted.
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 1000, time = 1000), circumference, receivedAtMs = 10_000L)
+        // event time advanced ~64.05 s -> wraps to a tiny delta; real gap is 64.05 s.
+        val result = decoder.decode(wheelPacket(revs = 1001, time = 1052), circumference, receivedAtMs = 74_050L)
+
+        assertEquals(2.0, result.distanceMeters, 1e-9) // 1 rev * 2.0 m
+        assertNull("speed suppressed across a >64 s wrap", result.speedKph)
+    }
+
+    @Test
     fun twoCrankPacketsGiveCorrectCadence() {
         val decoder = CscMeasurementDecoder()
         decoder.decode(crankPacket(revs = 100, time = 1000), circumference)

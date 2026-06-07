@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.io.File
+import java.util.Locale
 import com.roundearth.bikecomputer.ui.theme.Divider
 import com.roundearth.bikecomputer.ui.theme.Green
 import com.roundearth.bikecomputer.ui.theme.Surface
@@ -67,13 +68,16 @@ private val WHEEL_PRESETS = listOf(
 fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsClick: () -> Unit) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // Always format the editable fields with '.' (Locale.US) because the SET handlers
+    // parse with toDoubleOrNull, which only accepts '.'. Default-locale formatting would
+    // render "2,096" on comma-decimal locales and the value could never be saved back.
     var circumferenceText by remember(state.wheelCircumferenceM) {
-        mutableStateOf("%.3f".format(state.wheelCircumferenceM))
+        mutableStateOf(String.format(Locale.US, "%.3f", state.wheelCircumferenceM))
     }
     // Sign is chosen with the E/W toggle, so the field itself stays positive —
     // many soft keyboards don't offer a minus key on the decimal layout.
     var declinationText by remember(state.magneticDeclinationDeg) {
-        mutableStateOf("%.1f".format(kotlin.math.abs(state.magneticDeclinationDeg)))
+        mutableStateOf(String.format(Locale.US, "%.1f", kotlin.math.abs(state.magneticDeclinationDeg)))
     }
     var declinationEast by remember(state.magneticDeclinationDeg) {
         mutableStateOf(state.magneticDeclinationDeg >= 0)
@@ -166,7 +170,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
                         OutlinedButton(
                             onClick = {
                                 viewModel.setWheelCircumference(value)
-                                circumferenceText = "%.3f".format(value)
+                                circumferenceText = String.format(Locale.US, "%.3f", value)
                             },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
@@ -174,7 +178,7 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(label, fontSize = 12.sp)
-                                Text("${"%.3f".format(value)}m", fontSize = 10.sp, color = TextSecondary)
+                                Text("${String.format(Locale.US, "%.3f", value)}m", fontSize = 10.sp, color = TextSecondary)
                             }
                         }
                     }
@@ -244,12 +248,11 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
             ) {
                 OutlinedButton(
                     onClick = {
-                        viewModel.exportCsv { csv ->
-                            val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-                            val file = File(dir, "bike-data.csv")
-                            file.writeText(csv)
+                        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+                        val file = File(dir, "bike-data.csv")
+                        viewModel.exportCsv(file) { written ->
                             val uri = FileProvider.getUriForFile(
-                                context, "${context.packageName}.fileprovider", file,
+                                context, "${context.packageName}.fileprovider", written,
                             )
                             val share = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/csv"

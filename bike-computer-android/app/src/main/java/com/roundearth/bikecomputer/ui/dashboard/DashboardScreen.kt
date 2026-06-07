@@ -25,7 +25,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -39,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.roundearth.bikecomputer.data.ConnectionState
+import com.roundearth.bikecomputer.data.signedAngleDelta
 import com.roundearth.bikecomputer.ui.BikeUiState
 import com.roundearth.bikecomputer.ui.theme.Divider
 import com.roundearth.bikecomputer.ui.theme.Green
@@ -109,6 +114,7 @@ private fun BearingRow(state: BikeUiState) {
         CompassCell(
             label = "TRUE",
             bearingDegrees = state.trueBearingDegrees,
+            degreesText = state.trueBearingDegreesText,
             cardinal = state.trueBearingCardinal,
             modifier = Modifier.weight(1f),
         )
@@ -121,6 +127,7 @@ private fun BearingRow(state: BikeUiState) {
         CompassCell(
             label = "MAGNETIC",
             bearingDegrees = state.bearingDegrees,
+            degreesText = state.bearingDegreesText,
             cardinal = state.bearingCardinal,
             modifier = Modifier.weight(1f),
         )
@@ -131,11 +138,22 @@ private fun BearingRow(state: BikeUiState) {
 private fun CompassCell(
     label: String,
     bearingDegrees: Float,
+    degreesText: String,
     cardinal: String,
     modifier: Modifier = Modifier,
 ) {
+    // Track an unwrapped, continuously-accumulating angle so the needle animates the
+    // short way across the 0/360 boundary instead of spinning ~340° the wrong way.
+    // A NaN (unknown) heading leaves the needle where it is rather than jumping.
+    var continuous by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(bearingDegrees) {
+        if (!bearingDegrees.isNaN()) {
+            val normalized = ((continuous % 360f) + 360f) % 360f
+            continuous += signedAngleDelta(normalized, bearingDegrees)
+        }
+    }
     val animatedBearing by animateFloatAsState(
-        targetValue = bearingDegrees,
+        targetValue = continuous,
         animationSpec = tween(durationMillis = 900),
         label = "bearing-$label",
     )
@@ -149,7 +167,7 @@ private fun CompassCell(
         Spacer(Modifier.width(12.dp))
         Column {
             Text(
-                text = "%03.0f°  %s".format(bearingDegrees, cardinal),
+                text = "$degreesText  $cardinal",
                 color = TextPrimary,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Light,

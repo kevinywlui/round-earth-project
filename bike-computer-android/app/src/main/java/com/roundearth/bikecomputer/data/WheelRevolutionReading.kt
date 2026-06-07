@@ -8,6 +8,8 @@ package com.roundearth.bikecomputer.data
 data class WheelRevolutionReading(
     val timestampMillis: Long,
     val cumulativeRevolutions: Long,
+    /** Revolutions this event advanced by (reboot/rollover-safe; 0 if unknown). */
+    val deltaRevolutions: Long,
     val sensorEventTime1024: Int,
     val wheelCircumferenceM: Double,
     /** Heading clockwise from magnetic north [0, 360). */

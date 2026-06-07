@@ -2,6 +2,9 @@ package com.roundearth.bikecomputer
 
 import android.app.Application
 import android.os.Build
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.roundearth.bikecomputer.data.BikeDataSource
 import com.roundearth.bikecomputer.data.BikeRepository
 import com.roundearth.bikecomputer.data.CscBleDataSource
@@ -68,5 +71,18 @@ class BikeApplication : Application() {
         appScope.launch {
             prefs.magneticDeclinationDeg.collect { declinationDeg = it.toFloat() }
         }
+        // Stop scanning/connections in the background (battery; Android throttles a
+        // long-running low-latency scan) and resume on return to the foreground. Only
+        // resumes if recording was already started, so it never pre-empts the
+        // permission request on first launch.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) {
+                repository.onForeground()
+            }
+
+            override fun onStop(owner: LifecycleOwner) {
+                repository.onBackground()
+            }
+        })
     }
 }

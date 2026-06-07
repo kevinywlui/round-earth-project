@@ -20,6 +20,12 @@ data class RevolutionEvent(
     val timestampMillis: Long,
     /** Cumulative wheel revolutions reported by the sensor (monotonic). */
     val cumulativeRevolutions: Long,
+    /**
+     * Revolutions this event advanced the wheel by, reboot/rollover-safe (0 at a
+     * baseline reset). Summing this is correct across sensor reboots, unlike
+     * MAX-MIN of [cumulativeRevolutions].
+     */
+    val deltaRevolutions: Long = 0,
     /** Sensor's "last wheel event time" in 1/1024 s units (16-bit, wraps at 64 s). */
     val sensorEventTime1024: Int,
     /** Wheel circumference in meters in effect when this event was recorded. */

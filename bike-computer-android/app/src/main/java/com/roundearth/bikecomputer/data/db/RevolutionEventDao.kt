@@ -29,7 +29,7 @@ interface RevolutionEventDao {
                COUNT(*) AS eventCount,
                MIN(timestampMillis) AS firstTimestamp,
                MAX(timestampMillis) AS lastTimestamp,
-               MAX(cumulativeRevolutions) - MIN(cumulativeRevolutions) AS totalRevolutions
+               COALESCE(SUM(deltaRevolutions), 0) AS totalRevolutions
         FROM revolution_events
         GROUP BY sessionId
         ORDER BY sessionId DESC
@@ -37,9 +37,17 @@ interface RevolutionEventDao {
     )
     fun observeSessions(): Flow<List<SessionSummary>>
 
-    /** All events, oldest first — used for CSV export. */
-    @Query("SELECT * FROM revolution_events ORDER BY timestampMillis ASC")
-    suspend fun getAll(): List<RevolutionEvent>
+    /** Most recent event by wall-clock, used to decide whether to resume a session. */
+    @Query("SELECT * FROM revolution_events ORDER BY timestampMillis DESC LIMIT 1")
+    suspend fun lastEvent(): RevolutionEvent?
+
+    /** Reboot/rollover-safe distance (meters) recorded for one session. */
+    @Query("SELECT SUM(deltaRevolutions * wheelCircumferenceM) FROM revolution_events WHERE sessionId = :sessionId")
+    suspend fun sessionDistanceMeters(sessionId: Long): Double?
+
+    /** A page of events with id greater than [afterId], oldest first — for streamed export. */
+    @Query("SELECT * FROM revolution_events WHERE id > :afterId ORDER BY id ASC LIMIT :limit")
+    suspend fun getPageAfter(afterId: Long, limit: Int): List<RevolutionEvent>
 
     @Query("DELETE FROM revolution_events")
     suspend fun deleteAll()

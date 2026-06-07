@@ -13,6 +13,12 @@ interface BikeDataSource {
     fun start()
     /** Release resources. */
     fun stop()
+
+    /**
+     * Seed the live odometer (meters) so a ride resumed after a process restart
+     * continues from its prior distance instead of zero. No-op by default.
+     */
+    fun seedOdometer(meters: Double) {}
 }
 
 enum class ConnectionState { DISCONNECTED, SCANNING, CONNECTED, SIMULATED }
