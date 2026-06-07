@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -18,6 +19,7 @@ class PreferencesStore(context: Context) {
         private val KEY_CIRCUMFERENCE = doublePreferencesKey("wheel_circumference_m")
         private val KEY_IMPERIAL = booleanPreferencesKey("use_imperial")
         private val KEY_DECLINATION = doublePreferencesKey("magnetic_declination_deg")
+        private val KEY_PAIRED_SENSORS = stringSetPreferencesKey("paired_sensors")
         const val DEFAULT_CIRCUMFERENCE = 2.096  // 700c × 25mm
         const val DEFAULT_DECLINATION = 0.0      // true == magnetic until the user sets it
     }
@@ -35,6 +37,11 @@ class PreferencesStore(context: Context) {
         it[KEY_DECLINATION] ?: DEFAULT_DECLINATION
     }
 
+    /** BLE addresses of sensors the user has chosen to connect to. */
+    val pairedSensors: Flow<Set<String>> = store.data.map {
+        it[KEY_PAIRED_SENSORS] ?: emptySet()
+    }
+
     suspend fun setWheelCircumference(meters: Double) {
         store.edit { it[KEY_CIRCUMFERENCE] = meters }
     }
@@ -45,5 +52,9 @@ class PreferencesStore(context: Context) {
 
     suspend fun setMagneticDeclination(degrees: Double) {
         store.edit { it[KEY_DECLINATION] = degrees }
+    }
+
+    suspend fun setPairedSensors(addresses: Set<String>) {
+        store.edit { it[KEY_PAIRED_SENSORS] = addresses }
     }
 }
