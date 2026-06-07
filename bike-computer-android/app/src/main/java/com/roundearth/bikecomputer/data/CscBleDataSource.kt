@@ -23,8 +23,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.math.abs
 
 /**
  * Connects to a CSC (Cycling Speed and Cadence) sensor over BLE, subscribes to
@@ -229,10 +231,12 @@ class CscBleDataSource(
                 )
             }
         } else {
-            _data.value = _data.value.copy(
-                bearingDegrees = headingDeg,
-                odometerKm = revs * circumference / 1000.0,
-            )
+            _data.update {
+                it.copy(
+                    bearingDegrees = headingDeg,
+                    odometerKm = revs * circumference / 1000.0,
+                )
+            }
         }
 
         prevRevs = revs
@@ -247,8 +251,10 @@ class CscBleDataSource(
             while (true) {
                 delay(1_000)
                 val idleMs = System.currentTimeMillis() - lastReadingWallClock
-                if (lastReadingWallClock > 0 && idleMs > 2_500 && _data.value.speedKph != 0.0) {
-                    _data.value = _data.value.copy(speedKph = 0.0, cadenceRpm = 0.0)
+                if (lastReadingWallClock > 0 && idleMs > 2_500) {
+                    _data.update {
+                        if (it.speedKph != 0.0) it.copy(speedKph = 0.0, cadenceRpm = 0.0) else it
+                    }
                 }
             }
         }
@@ -263,8 +269,12 @@ class CscBleDataSource(
         headingJob = scope.launch {
             while (true) {
                 val h = heading()
-                if (_data.value.bearingDegrees != h) {
-                    _data.value = _data.value.copy(bearingDegrees = h)
+                // Atomic compare-and-set; ignore sub-degree sensor jitter so a
+                // stationary phone produces no churn. Returning the same instance
+                // skips the emission (StateFlow dedups equal values).
+                _data.update {
+                    if (abs(it.bearingDegrees - h) < HEADING_EPSILON_DEG) it
+                    else it.copy(bearingDegrees = h)
                 }
                 delay(250)
             }
@@ -282,6 +292,8 @@ class CscBleDataSource(
 
     companion object {
         private const val TAG = "CscBleDataSource"
+        // Minimum heading change (degrees) that warrants a live update.
+        private const val HEADING_EPSILON_DEG = 1f
         private val CSC_SERVICE_UUID = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb")
         private val CSC_MEASUREMENT_UUID = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")

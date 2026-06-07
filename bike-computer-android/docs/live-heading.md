@@ -8,8 +8,12 @@ independent of wheel motion.
 - **Heading ticker:** `CscBleDataSource` runs a `headingJob` that polls
   `HeadingProvider` every **250 ms (4 Hz)** and writes `bearingDegrees` into the
   live `RawBikeData` state.
-- **No redundant emissions:** state is only updated when the heading actually
-  changes, so a stationary phone produces no churn.
+- **No redundant emissions:** state is only updated when the heading moves at
+  least 1° (`HEADING_EPSILON_DEG`), so sub-degree sensor jitter on a stationary
+  phone produces no churn.
+- **Thread safety:** all live-state mutations go through `MutableStateFlow.update`
+  (atomic compare-and-set), so the BLE callback, stale-speed watcher, and heading
+  ticker can write concurrently without clobbering each other.
 - **Lifecycle:** the ticker is a `Job` started in `start()` and cancelled in
   `stop()`, alongside the stale-speed watcher.
 - **Recording:** events still capture `heading()` at the moment of each wheel
