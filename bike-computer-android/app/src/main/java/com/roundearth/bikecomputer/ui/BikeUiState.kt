@@ -21,7 +21,7 @@ data class BikeUiState(
 }
 
 /** Eight-point compass label for a heading in degrees. */
-fun cardinal(degrees: Float): String {
+private fun cardinal(degrees: Float): String {
     val index = ((degrees + 22.5).toInt() % 360) / 45
     return listOf("N", "NE", "E", "SE", "S", "SW", "W", "NW").getOrElse(index) { "N" }
 }

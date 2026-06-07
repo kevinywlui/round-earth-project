@@ -17,9 +17,12 @@ and every recorded revolution stores both headings.
   magnetic-declination.com.
 - **Live state:** `RawBikeData` carries both `bearingDegrees` (magnetic) and
   `trueBearingDegrees`. The heading ticker and per-revolution path update both;
-  the ticker still gates on the 1° jitter threshold (now across both values).
+  the ticker still gates on the 1° jitter threshold (now across both values,
+  using wrap-aware `angularDistance` so the 0/360 boundary doesn't churn).
 - **Storage:** `RevolutionEvent` keeps the existing `headingDegrees` (magnetic)
-  and adds `trueHeadingDegrees` (DB v3, `MIGRATION_2_3`). CSV export gains a
+  and adds `trueHeadingDegrees` (DB v3, `MIGRATION_2_3`). The migration backfills
+  legacy rows from `headingDegrees` (old declination unknown, so assumed 0) so
+  historical exports don't show a bogus 0° true heading. CSV export gains a
   `true_heading_degrees` column. Declination is recoverable as
   `true − magnetic`, so storage stays lossless even though declination is a
   mutable preference.

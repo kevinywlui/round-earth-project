@@ -70,8 +70,13 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
     var circumferenceText by remember(state.wheelCircumferenceM) {
         mutableStateOf("%.3f".format(state.wheelCircumferenceM))
     }
+    // Sign is chosen with the E/W toggle, so the field itself stays positive —
+    // many soft keyboards don't offer a minus key on the decimal layout.
     var declinationText by remember(state.magneticDeclinationDeg) {
-        mutableStateOf("%.1f".format(state.magneticDeclinationDeg))
+        mutableStateOf("%.1f".format(kotlin.math.abs(state.magneticDeclinationDeg)))
+    }
+    var declinationEast by remember(state.magneticDeclinationDeg) {
+        mutableStateOf(state.magneticDeclinationDeg >= 0)
     }
 
     Column(
@@ -170,23 +175,35 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
             SectionLabel("MAGNETIC DECLINATION")
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "Degrees east (+) or west (−) to convert magnetic heading to true " +
-                    "north. Look up your location at magnetic-declination.com.",
+                text = "Degrees to convert magnetic heading to true north. Pick east " +
+                    "or west, then enter the magnitude. Look up your location at " +
+                    "magnetic-declination.com.",
                 color = TextSecondary,
                 fontSize = 12.sp,
             )
             Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("West", color = TextPrimary, fontSize = 14.sp)
+                Switch(
+                    checked = declinationEast,
+                    onCheckedChange = { declinationEast = it },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    colors = SwitchDefaults.colors(checkedTrackColor = Green),
+                )
+                Text("East", color = TextPrimary, fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(10.dp))
             OutlinedTextField(
                 value = declinationText,
                 onValueChange = { declinationText = it },
-                label = { Text("Degrees (E positive)") },
+                label = { Text("Degrees") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 singleLine = true,
                 trailingIcon = {
                     TextButton(onClick = {
                         declinationText.toDoubleOrNull()
-                            ?.coerceIn(-180.0, 180.0)
-                            ?.let { viewModel.setMagneticDeclination(it) }
+                            ?.coerceIn(0.0, 180.0)
+                            ?.let { mag -> viewModel.setMagneticDeclination(if (declinationEast) mag else -mag) }
                     }) { Text("SET", color = Green) }
                 },
                 colors = OutlinedTextFieldDefaults.colors(

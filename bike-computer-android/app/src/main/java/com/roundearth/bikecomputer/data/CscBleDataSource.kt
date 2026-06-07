@@ -26,7 +26,6 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
-import kotlin.math.abs
 
 /**
  * Connects to a CSC (Cycling Speed and Cadence) sensor over BLE, subscribes to
@@ -280,8 +279,8 @@ class CscBleDataSource(
                 // stationary phone produces no churn. Returning the same instance
                 // skips the emission (StateFlow dedups equal values).
                 _data.update {
-                    if (abs(it.bearingDegrees - h) < HEADING_EPSILON_DEG &&
-                        abs(it.trueBearingDegrees - t) < HEADING_EPSILON_DEG
+                    if (angularDistance(it.bearingDegrees, h) < HEADING_EPSILON_DEG &&
+                        angularDistance(it.trueBearingDegrees, t) < HEADING_EPSILON_DEG
                     ) it
                     else it.copy(bearingDegrees = h, trueBearingDegrees = t)
                 }

@@ -24,11 +24,14 @@ abstract class BikeDatabase : RoomDatabase() {
         }
 
         // v3: add trueHeadingDegrees (magnetic + declination) alongside magnetic.
+        // Backfill legacy rows from headingDegrees (declination unknown for old
+        // data, so assume 0 — true == magnetic — rather than a bogus 0° true).
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL(
                     "ALTER TABLE revolution_events ADD COLUMN trueHeadingDegrees REAL NOT NULL DEFAULT 0"
                 )
+                db.execSQL("UPDATE revolution_events SET trueHeadingDegrees = headingDegrees")
             }
         }
 

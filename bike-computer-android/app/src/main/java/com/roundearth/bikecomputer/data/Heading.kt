@@ -8,3 +8,12 @@ package com.roundearth.bikecomputer.data
  */
 fun trueFromMagnetic(magneticDeg: Float, declinationDeg: Float): Float =
     ((magneticDeg + declinationDeg) % 360f + 360f) % 360f
+
+/**
+ * Shortest angular distance between two headings in degrees, in [0, 180].
+ * Wrap-aware: distance(359.8, 0.2) == 0.4, not 359.6.
+ */
+fun angularDistance(a: Float, b: Float): Float {
+    val d = ((a - b) % 360f + 360f) % 360f
+    return if (d > 180f) 360f - d else d
+}
