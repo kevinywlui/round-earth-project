@@ -2,6 +2,7 @@ package com.roundearth.bikecomputer.data
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
@@ -13,24 +14,44 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/** A CSC sensor seen during scanning, surfaced to the picker UI. */
+data class DiscoveredSensor(
+    val address: String,
+    val name: String,
+    val rssi: Int,
+    val paired: Boolean,
+    val connected: Boolean,
+)
 
 /**
- * Connects to a CSC (Cycling Speed and Cadence) sensor over BLE, subscribes to
- * wheel-revolution notifications, and turns them into both live dashboard values
- * and raw [WheelRevolutionReading]s for persistence.
+ * Connects to CSC (Cycling Speed and Cadence) sensors over BLE, subscribes to
+ * their measurement notifications, and turns them into both live dashboard
+ * values and raw [WheelRevolutionReading]s for persistence.
+ *
+ * Scans for the CSC service (0x1816) and surfaces every device via [discovered]
+ * for the picker UI. It connects only to sensors the user has **paired** (their
+ * addresses come from [pairedSensors]); pairing more than one is supported, so a
+ * dedicated speed sensor and a dedicated cadence sensor merge into one stream.
+ * Wheel data feeds speed/odometer (using the configured circumference) and the
+ * persisted readings; crank data feeds cadence.
  *
  * Callers MUST hold BLUETOOTH_SCAN / BLUETOOTH_CONNECT (API 31+) before [start].
  */
@@ -43,11 +64,14 @@ class CscBleDataSource(
     private val heading: () -> Float = { 0f },
     /** Current magnetic declination in degrees (positive east); read fresh per use. */
     private val declination: () -> Float = { 0f },
+    /** Addresses of sensors the user has chosen to connect to. */
+    private val pairedSensors: Flow<Set<String>> = MutableStateFlow(emptySet()),
 ) : BikeDataSource {
 
     private val scope = CoroutineScope(SupervisorJob())
     private var staleJob: Job? = null
     private var headingJob: Job? = null
+    private var pairedJob: Job? = null
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -60,17 +84,26 @@ class CscBleDataSource(
     private val _readings = Channel<WheelRevolutionReading>(Channel.UNLIMITED)
     override val revolutionReadings = _readings.receiveAsFlow()
 
+    private val _discovered = MutableStateFlow<List<DiscoveredSensor>>(emptyList())
+    /** Sensors seen while scanning, with their paired/connected status. */
+    val discovered: StateFlow<List<DiscoveredSensor>> = _discovered
+
     private val adapter: BluetoothAdapter? by lazy {
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
 
-    private var gatt: BluetoothGatt? = null
+    @Volatile private var pairedAddresses: Set<String> = emptySet()
     private var scanning = false
 
-    // Rolling state for speed/cadence derivation.
-    private var prevRevs: Long = -1
-    private var prevEventTime1024: Int = 0
-    private var lastReadingWallClock: Long = 0
+    // Merged live state across all connected sensors.
+    @Volatile private var speedKph = 0.0
+    @Volatile private var cadenceRpm = 0.0
+    @Volatile private var odometerM = 0.0
+    @Volatile private var lastActivityAt = 0L
+
+    private val devices = ConcurrentHashMap<String, BluetoothDevice>()      // address -> last seen device
+    private val seen = ConcurrentHashMap<String, DiscoveredSensor>()        // address -> UI model
+    private val connections = ConcurrentHashMap<String, SensorConnection>() // address -> live connection
 
     override fun start() {
         val adapter = adapter
@@ -79,7 +112,16 @@ class CscBleDataSource(
             _connectionState.value = ConnectionState.DISCONNECTED
             return
         }
-        if (scanning || gatt != null) return
+        if (scanning) return
+        pairedJob = scope.launch {
+            pairedSensors.collect { paired ->
+                pairedAddresses = paired
+                connections.keys.filter { it !in paired }.forEach { disconnect(it) }
+                paired.forEach { addr -> if (devices.containsKey(addr)) connectIfNeeded(addr) }
+                publishDiscovered()
+                updateConnectionState()
+            }
+        }
         startScan()
         startStaleWatcher()
         startHeadingTicker()
@@ -87,13 +129,11 @@ class CscBleDataSource(
 
     override fun stop() {
         stopScan()
-        gatt?.close()
-        gatt = null
-        staleJob?.cancel()
-        staleJob = null
-        headingJob?.cancel()
-        headingJob = null
-        prevRevs = -1
+        connections.values.forEach { it.gatt?.close() }
+        connections.clear()
+        staleJob?.cancel(); staleJob = null
+        headingJob?.cancel(); headingJob = null
+        pairedJob?.cancel(); pairedJob = null
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
@@ -114,8 +154,8 @@ class CscBleDataSource(
             return
         }
         scanning = true
-        _connectionState.value = ConnectionState.SCANNING
-        Log.i(TAG, "scanning for CSC sensor")
+        updateConnectionState()
+        Log.i(TAG, "scanning for CSC sensors")
     }
 
     private fun stopScan() {
@@ -127,126 +167,72 @@ class CscBleDataSource(
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
-            Log.i(TAG, "found ${device.address}, connecting")
-            stopScan()
-            gatt = device.connectGatt(context, false, gattCallback)
+            val address = device.address
+            devices[address] = device
+            // scanRecord.deviceName comes from the advertisement (no CONNECT needed).
+            val name = result.scanRecord?.deviceName ?: address
+            seen[address] = DiscoveredSensor(
+                address = address,
+                name = name,
+                rssi = result.rssi,
+                paired = address in pairedAddresses,
+                connected = connections[address]?.ready == true,
+            )
+            publishDiscovered()
+            if (address in pairedAddresses) connectIfNeeded(address)
         }
 
         override fun onScanFailed(errorCode: Int) {
             Log.e(TAG, "scan failed: $errorCode")
             scanning = false
-            _connectionState.value = ConnectionState.DISCONNECTED
+            updateConnectionState()
         }
     }
 
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "connected, discovering services")
-                    g.discoverServices()
-                }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.w(TAG, "disconnected (status=$status), rescanning")
-                    g.close()
-                    gatt = null
-                    prevRevs = -1
-                    _connectionState.value = ConnectionState.SCANNING
-                    startScan()
-                }
-            }
-        }
+    private fun connectIfNeeded(address: String) {
+        if (connections.containsKey(address)) return
+        val device = devices[address] ?: return
+        val conn = SensorConnection(address)
+        connections[address] = conn
+        Log.i(TAG, "connecting to $address")
+        conn.gatt = device.connectGatt(context, false, conn)
+    }
 
-        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-            val service = g.getService(CSC_SERVICE_UUID)
-            val measurement = service?.getCharacteristic(CSC_MEASUREMENT_UUID)
-            if (measurement == null) {
-                Log.e(TAG, "CSC measurement characteristic not found")
-                return
-            }
-            g.setCharacteristicNotification(measurement, true)
-            val cccd = measurement.getDescriptor(CCCD_UUID)
-            if (cccd != null) {
-                @Suppress("DEPRECATION")
-                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                @Suppress("DEPRECATION")
-                g.writeDescriptor(cccd)
-            }
-            _connectionState.value = ConnectionState.CONNECTED
-            Log.i(TAG, "subscribed to CSC notifications")
-        }
+    private fun disconnect(address: String) {
+        connections.remove(address)?.gatt?.close()
+        markConnected(address, false)
+    }
 
-        @Suppress("DEPRECATION")
-        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
-            if (c.uuid == CSC_MEASUREMENT_UUID) handleMeasurement(c.value)
-        }
+    private fun markConnected(address: String, connected: Boolean) {
+        seen[address]?.let { seen[address] = it.copy(connected = connected) }
+        publishDiscovered()
+        updateConnectionState()
+    }
 
-        // API 33+ overload.
-        override fun onCharacteristicChanged(
-            g: BluetoothGatt,
-            c: BluetoothGattCharacteristic,
-            value: ByteArray,
-        ) {
-            if (c.uuid == CSC_MEASUREMENT_UUID) handleMeasurement(value)
+    private fun publishDiscovered() {
+        _discovered.value = seen.values
+            .map { it.copy(paired = it.address in pairedAddresses) }
+            .sortedWith(compareByDescending<DiscoveredSensor> { it.connected }.thenByDescending { it.rssi })
+    }
+
+    private fun updateConnectionState() {
+        _connectionState.value = when {
+            connections.values.any { it.ready } -> ConnectionState.CONNECTED
+            scanning -> ConnectionState.SCANNING
+            else -> ConnectionState.DISCONNECTED
         }
     }
 
-    /**
-     * Parses a CSC Measurement packet. Wheel data is present when flags bit 0 is
-     * set: a 32-bit LE cumulative revolution count followed by a 16-bit LE last
-     * wheel event time in 1/1024 s units.
-     */
-    private fun handleMeasurement(bytes: ByteArray?) {
-        if (bytes == null || bytes.isEmpty()) return
-        val flags = bytes[0].toInt()
-        if (flags and 0x01 == 0 || bytes.size < 7) return
-
-        val revs = u32le(bytes, 1)
-        val eventTime = u16le(bytes, 5)
-        val now = System.currentTimeMillis()
-        val circumference = wheelCircumferenceM()
-        val headingDeg = heading()
-        val trueHeadingDeg = trueFromMagnetic(headingDeg, declination())
-
-        _readings.trySend(
-            WheelRevolutionReading(
-                timestampMillis = now,
-                cumulativeRevolutions = revs,
-                sensorEventTime1024 = eventTime,
-                wheelCircumferenceM = circumference,
-                headingDegrees = headingDeg,
-                trueHeadingDegrees = trueHeadingDeg,
-            )
+    private fun emitData() {
+        val h = heading()
+        val t = trueFromMagnetic(h, declination())
+        _data.value = RawBikeData(
+            speedKph = speedKph,
+            cadenceRpm = cadenceRpm,
+            bearingDegrees = h,
+            trueBearingDegrees = t,
+            odometerKm = odometerM / 1000.0,
         )
-
-        if (prevRevs >= 0) {
-            val deltaRevs = revs - prevRevs
-            // Sensor event time is a 16-bit value that wraps every ~64 s.
-            val deltaTicks = (eventTime - prevEventTime1024) and 0xFFFF
-            val deltaSec = if (deltaTicks > 0) deltaTicks / 1024.0 else (now - lastReadingWallClock) / 1000.0
-            if (deltaRevs > 0 && deltaSec > 0) {
-                val speedMs = deltaRevs * circumference / deltaSec
-                _data.value = RawBikeData(
-                    speedKph = speedMs * 3.6,
-                    cadenceRpm = deltaRevs / deltaSec * 60.0,
-                    bearingDegrees = headingDeg,
-                    trueBearingDegrees = trueHeadingDeg,
-                    odometerKm = revs * circumference / 1000.0,
-                )
-            }
-        } else {
-            _data.update {
-                it.copy(
-                    bearingDegrees = headingDeg,
-                    trueBearingDegrees = trueHeadingDeg,
-                    odometerKm = revs * circumference / 1000.0,
-                )
-            }
-        }
-
-        prevRevs = revs
-        prevEventTime1024 = eventTime
-        lastReadingWallClock = now
     }
 
     /** Zeroes speed/cadence when no revolutions arrive (the bike has stopped). */
@@ -255,11 +241,11 @@ class CscBleDataSource(
         staleJob = scope.launch {
             while (true) {
                 delay(1_000)
-                val idleMs = System.currentTimeMillis() - lastReadingWallClock
-                if (lastReadingWallClock > 0 && idleMs > 2_500) {
-                    _data.update {
-                        if (it.speedKph != 0.0) it.copy(speedKph = 0.0, cadenceRpm = 0.0) else it
-                    }
+                val idle = SystemClock.elapsedRealtime() - lastActivityAt
+                if (lastActivityAt > 0 && idle > STALE_MS && (speedKph != 0.0 || cadenceRpm != 0.0)) {
+                    speedKph = 0.0
+                    cadenceRpm = 0.0
+                    _data.update { it.copy(speedKph = 0.0, cadenceRpm = 0.0) }
                 }
             }
         }
@@ -289,17 +275,104 @@ class CscBleDataSource(
         }
     }
 
-    private fun u16le(b: ByteArray, i: Int): Int =
-        (b[i].toInt() and 0xFF) or ((b[i + 1].toInt() and 0xFF) shl 8)
+    /** One BLE connection to a single CSC sensor, with its own decode state. */
+    private inner class SensorConnection(private val address: String) : BluetoothGattCallback() {
 
-    private fun u32le(b: ByteArray, i: Int): Long =
-        (b[i].toLong() and 0xFF) or
-            ((b[i + 1].toLong() and 0xFF) shl 8) or
-            ((b[i + 2].toLong() and 0xFF) shl 16) or
-            ((b[i + 3].toLong() and 0xFF) shl 24)
+        @Volatile var gatt: BluetoothGatt? = null
+        @Volatile var ready = false
+        private val decoder = CscMeasurementDecoder()
+
+        override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    Log.i(TAG, "connected $address, discovering services")
+                    g.discoverServices()
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    Log.w(TAG, "disconnected $address (status=$status)")
+                    g.close()
+                    connections.remove(address)
+                    ready = false
+                    // Continuous scanning will rediscover and reconnect if still paired.
+                    markConnected(address, false)
+                }
+            }
+        }
+
+        override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            val measurement = g.getService(CSC_SERVICE_UUID)?.getCharacteristic(CSC_MEASUREMENT_UUID)
+            if (measurement == null) {
+                Log.e(TAG, "CSC measurement characteristic not found on $address")
+                return
+            }
+            g.setCharacteristicNotification(measurement, true)
+            val cccd = measurement.getDescriptor(CCCD_UUID) ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            } else {
+                @Suppress("DEPRECATION")
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                @Suppress("DEPRECATION")
+                g.writeDescriptor(cccd)
+            }
+        }
+
+        override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            ready = true
+            markConnected(address, true)
+            Log.i(TAG, "subscribed to $address")
+        }
+
+        @Deprecated("Deprecated in API 33; the ByteArray overload is used there")
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
+            if (c.uuid == CSC_MEASUREMENT_UUID) handleMeasurement(c.value)
+        }
+
+        // API 33+ overload.
+        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
+            if (c.uuid == CSC_MEASUREMENT_UUID) handleMeasurement(value)
+        }
+
+        private fun handleMeasurement(bytes: ByteArray?) {
+            if (bytes == null || bytes.isEmpty()) return
+            val circumference = wheelCircumferenceM()
+            val result = decoder.decode(bytes, circumference)
+
+            // Persist every wheel revolution losslessly for the time-series.
+            result.wheelCumulativeRevs?.let { revs ->
+                val h = heading()
+                _readings.trySend(
+                    WheelRevolutionReading(
+                        timestampMillis = System.currentTimeMillis(),
+                        cumulativeRevolutions = revs,
+                        sensorEventTime1024 = result.wheelEventTime1024 ?: 0,
+                        wheelCircumferenceM = circumference,
+                        headingDegrees = h,
+                        trueHeadingDegrees = trueFromMagnetic(h, declination()),
+                    )
+                )
+            }
+
+            var changed = false
+            result.speedKph?.let {
+                speedKph = it
+                odometerM += result.distanceMeters
+                lastActivityAt = SystemClock.elapsedRealtime()
+                changed = true
+            }
+            result.cadenceRpm?.let {
+                cadenceRpm = it
+                lastActivityAt = SystemClock.elapsedRealtime()
+                changed = true
+            }
+            if (changed) emitData()
+        }
+    }
 
     companion object {
         private const val TAG = "CscBleDataSource"
+        private const val STALE_MS = 2_500L
         // Minimum heading change (degrees) that warrants a live update.
         private const val HEADING_EPSILON_DEG = 1f
         private val CSC_SERVICE_UUID = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb")

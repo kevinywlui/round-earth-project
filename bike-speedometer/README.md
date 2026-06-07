@@ -61,6 +61,6 @@ All configuration is at the top of `speed/speed.ino`:
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `DEVICE_NAME` | `"Bike Speed"` | BLE device name advertised to clients |
+| `DEVICE_NAME` | `"Bike Speed"` | BLE name prefix; the last two bytes of the MAC are appended at boot (e.g. `Bike Speed 3F9A`) so multiple units are distinguishable |
 | `SENSOR_PIN` | `D0` | GPIO pin connected to the hall effect sensor |
-| `MIN_MS` | `15` | Minimum milliseconds between triggers (debounce) |
+| `MIN_MS` | `60` | Minimum milliseconds between triggers (debounce; ~125 km/h ceiling on a 2.1 m wheel) |

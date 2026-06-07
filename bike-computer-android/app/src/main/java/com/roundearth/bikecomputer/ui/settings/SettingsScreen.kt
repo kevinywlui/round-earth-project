@@ -64,7 +64,7 @@ private val WHEEL_PRESETS = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
+fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsClick: () -> Unit) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var circumferenceText by remember(state.wheelCircumferenceM) {
@@ -100,6 +100,18 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                 .padding(20.dp),
         ) {
 
+            SectionLabel("SENSORS")
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onSensorsClick,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                border = BorderStroke(1.dp, Divider),
+            ) {
+                Text("Manage Bluetooth Sensors")
+            }
+
+            Spacer(Modifier.height(28.dp))
             SectionLabel("UNITS")
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {

@@ -18,6 +18,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.roundearth.bikecomputer.ui.dashboard.BikeViewModel
 import com.roundearth.bikecomputer.ui.dashboard.DashboardScreen
+import com.roundearth.bikecomputer.ui.sensors.SensorScreen
+import com.roundearth.bikecomputer.ui.sensors.SensorViewModel
 import com.roundearth.bikecomputer.ui.settings.SettingsScreen
 import com.roundearth.bikecomputer.ui.settings.SettingsViewModel
 import com.roundearth.bikecomputer.ui.theme.BikeComputerTheme
@@ -40,6 +42,8 @@ class MainActivity : ComponentActivity() {
                 val bikeVm: BikeViewModel = viewModel(factory = BikeViewModel.Factory(app.repository))
                 val settingsVm: SettingsViewModel =
                     viewModel(factory = SettingsViewModel.Factory(app.prefs, app.repository))
+                val sensorVm: SensorViewModel =
+                    viewModel(factory = SensorViewModel.Factory(app.bleSource, app.prefs))
                 val nav = rememberNavController()
 
                 // Request BLE permissions, then start scanning/recording — but only
@@ -63,7 +67,14 @@ class MainActivity : ComponentActivity() {
                         DashboardScreen(viewModel = bikeVm, onSettingsClick = { nav.navigate("settings") })
                     }
                     composable("settings") {
-                        SettingsScreen(viewModel = settingsVm, onBack = { nav.popBackStack() })
+                        SettingsScreen(
+                            viewModel = settingsVm,
+                            onBack = { nav.popBackStack() },
+                            onSensorsClick = { nav.navigate("sensors") },
+                        )
+                    }
+                    composable("sensors") {
+                        SensorScreen(viewModel = sensorVm, onBack = { nav.popBackStack() })
                     }
                 }
             }

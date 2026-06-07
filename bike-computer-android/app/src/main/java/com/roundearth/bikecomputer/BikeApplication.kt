@@ -30,15 +30,23 @@ class BikeApplication : Application() {
     /** True when the real BLE source is in use (and BLE runtime permissions are needed). */
     val usesBle: Boolean by lazy { !isEmulator() }
 
+    /** The real BLE source when on hardware, else null (emulator uses simulated data). */
+    val bleSource: CscBleDataSource? by lazy {
+        if (isEmulator()) null
+        else CscBleDataSource(
+            context = this,
+            wheelCircumferenceM = { circumferenceM },
+            heading = { headingProvider.degrees },
+            declination = { declinationDeg },
+            pairedSensors = prefs.pairedSensors,
+        )
+    }
+
     val repository: BikeRepository by lazy {
         val db = BikeDatabase.get(this)
         // Emulators have no BLE radio — fall back to simulated data so the app is
         // usable without hardware. Real devices use the CSC sensor.
-        val source: BikeDataSource = if (isEmulator()) {
-            SimulatedBikeDataSource({ circumferenceM }, { declinationDeg })
-        } else {
-            CscBleDataSource(this, { circumferenceM }, { headingProvider.degrees }, { declinationDeg })
-        }
+        val source: BikeDataSource = bleSource ?: SimulatedBikeDataSource({ circumferenceM }, { declinationDeg })
         BikeRepository(source, prefs, db.revolutionEventDao(), appScope)
     }
 
