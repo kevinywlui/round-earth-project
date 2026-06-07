@@ -85,7 +85,7 @@ private fun TopBar(onSettingsClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "BIKE COMPUTER",
+            text = "☀️ BIKE COMPUTER",
             color = Green,
             fontSize = 11.sp,
             fontWeight = FontWeight.Bold,
