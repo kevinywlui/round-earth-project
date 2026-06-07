@@ -13,13 +13,28 @@ android {
         applicationId = "com.roundearth.bikecomputer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // Overridable from CI (e.g. -PversionName=1.2.0 -PversionCode=7) so each
+        // tagged release carries a distinct, increasing version for Obtainium.
+        versionCode = (project.findProperty("versionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("versionName") as String?) ?: "1.0"
+    }
+
+    // Debug-grade key committed to the repo on purpose: it carries no secret
+    // (password is the well-known "android"), but staying constant is what lets
+    // Android install Obtainium updates over a previous install.
+    signingConfigs {
+        create("release") {
+            storeFile = file("release.keystore")
+            storePassword = "android"
+            keyAlias = "bikecomputer"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
