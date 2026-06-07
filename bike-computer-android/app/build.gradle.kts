@@ -19,22 +19,31 @@ android {
         versionName = (project.findProperty("versionName") as String?) ?: "1.0"
     }
 
-    // Debug-grade key committed to the repo on purpose: it carries no secret
-    // (password is the well-known "android"), but staying constant is what lets
-    // Android install Obtainium updates over a previous install.
+    // Release signing key, supplied by CI from GitHub Secrets (decoded to a file
+    // whose path is passed via SIGNING_KEYSTORE_FILE). The key itself never lives
+    // in the repo. A constant key is what lets Android install updates over a
+    // previous install. Absent locally, where the build falls back to debug.
     signingConfigs {
         create("release") {
-            storeFile = file("release.keystore")
-            storePassword = "android"
-            keyAlias = "bikecomputer"
-            keyPassword = "android"
+            System.getenv("SIGNING_KEYSTORE_FILE")?.let { path ->
+                storeFile = file(path)
+                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            // Use the release key when CI provides it, else fall back to the debug
+            // key so a local `assembleRelease` still yields an installable APK.
+            signingConfig = if (System.getenv("SIGNING_KEYSTORE_FILE") != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
