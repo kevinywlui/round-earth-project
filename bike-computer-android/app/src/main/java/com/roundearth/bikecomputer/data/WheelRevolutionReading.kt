@@ -10,5 +10,8 @@ data class WheelRevolutionReading(
     val cumulativeRevolutions: Long,
     val sensorEventTime1024: Int,
     val wheelCircumferenceM: Double,
+    /** Heading clockwise from magnetic north [0, 360). */
     val headingDegrees: Float,
+    /** Heading clockwise from true (geographic) north [0, 360) = magnetic + declination. */
+    val trueHeadingDegrees: Float,
 )

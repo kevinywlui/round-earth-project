@@ -24,6 +24,8 @@ data class RevolutionEvent(
     val sensorEventTime1024: Int,
     /** Wheel circumference in meters in effect when this event was recorded. */
     val wheelCircumferenceM: Double,
-    /** Compass heading in degrees clockwise from north [0, 360) at this event. */
+    /** Compass heading clockwise from magnetic north [0, 360) at this event. */
     val headingDegrees: Float,
+    /** Heading clockwise from true (geographic) north [0, 360) = magnetic + declination. */
+    val trueHeadingDegrees: Float = 0f,
 )

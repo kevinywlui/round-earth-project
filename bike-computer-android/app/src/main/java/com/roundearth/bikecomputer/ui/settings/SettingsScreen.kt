@@ -70,6 +70,9 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
     var circumferenceText by remember(state.wheelCircumferenceM) {
         mutableStateOf("%.3f".format(state.wheelCircumferenceM))
     }
+    var declinationText by remember(state.magneticDeclinationDeg) {
+        mutableStateOf("%.1f".format(state.magneticDeclinationDeg))
+    }
 
     Column(
         modifier = Modifier
@@ -162,6 +165,40 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(8.dp))
             }
+
+            Spacer(Modifier.height(28.dp))
+            SectionLabel("MAGNETIC DECLINATION")
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "Degrees east (+) or west (−) to convert magnetic heading to true " +
+                    "north. Look up your location at magnetic-declination.com.",
+                color = TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = declinationText,
+                onValueChange = { declinationText = it },
+                label = { Text("Degrees (E positive)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                trailingIcon = {
+                    TextButton(onClick = {
+                        declinationText.toDoubleOrNull()
+                            ?.coerceIn(-180.0, 180.0)
+                            ?.let { viewModel.setMagneticDeclination(it) }
+                    }) { Text("SET", color = Green) }
+                },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = Green,
+                    unfocusedBorderColor = Divider,
+                    focusedLabelColor = Green,
+                    unfocusedLabelColor = TextSecondary,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             Spacer(Modifier.height(20.dp))
             SectionLabel("RECORDED DATA")

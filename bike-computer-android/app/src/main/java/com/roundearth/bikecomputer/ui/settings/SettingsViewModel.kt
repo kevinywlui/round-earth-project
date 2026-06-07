@@ -16,6 +16,7 @@ import kotlinx.coroutines.withContext
 data class SettingsUiState(
     val wheelCircumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE,
     val useImperial: Boolean = false,
+    val magneticDeclinationDeg: Double = PreferencesStore.DEFAULT_DECLINATION,
     val recordedEventCount: Int = 0,
     val sessions: List<SessionSummary> = emptyList(),
 )
@@ -28,12 +29,14 @@ class SettingsViewModel(
     val uiState = combine(
         prefs.wheelCircumferenceMeters,
         prefs.useImperial,
+        prefs.magneticDeclinationDeg,
         repository.recordedEventCount,
         repository.sessions,
-    ) { circumference, imperial, count, sessions ->
+    ) { circumference, imperial, declination, count, sessions ->
         SettingsUiState(
             wheelCircumferenceM = circumference,
             useImperial = imperial,
+            magneticDeclinationDeg = declination,
             recordedEventCount = count,
             sessions = sessions,
         )
@@ -49,6 +52,10 @@ class SettingsViewModel(
 
     fun setUseImperial(imperial: Boolean) {
         viewModelScope.launch { prefs.setUseImperial(imperial) }
+    }
+
+    fun setMagneticDeclination(degrees: Double) {
+        viewModelScope.launch { prefs.setMagneticDeclination(degrees) }
     }
 
     /** Builds the CSV off the main thread and hands it back via [onReady] for sharing. */

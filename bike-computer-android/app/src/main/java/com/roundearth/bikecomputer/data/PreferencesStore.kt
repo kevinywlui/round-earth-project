@@ -17,7 +17,9 @@ class PreferencesStore(context: Context) {
     companion object {
         private val KEY_CIRCUMFERENCE = doublePreferencesKey("wheel_circumference_m")
         private val KEY_IMPERIAL = booleanPreferencesKey("use_imperial")
+        private val KEY_DECLINATION = doublePreferencesKey("magnetic_declination_deg")
         const val DEFAULT_CIRCUMFERENCE = 2.096  // 700c × 25mm
+        const val DEFAULT_DECLINATION = 0.0      // true == magnetic until the user sets it
     }
 
     val wheelCircumferenceMeters: Flow<Double> = store.data.map {
@@ -28,11 +30,20 @@ class PreferencesStore(context: Context) {
         it[KEY_IMPERIAL] ?: false
     }
 
+    /** Local magnetic declination in degrees (positive east); added to magnetic heading. */
+    val magneticDeclinationDeg: Flow<Double> = store.data.map {
+        it[KEY_DECLINATION] ?: DEFAULT_DECLINATION
+    }
+
     suspend fun setWheelCircumference(meters: Double) {
         store.edit { it[KEY_CIRCUMFERENCE] = meters }
     }
 
     suspend fun setUseImperial(imperial: Boolean) {
         store.edit { it[KEY_IMPERIAL] = imperial }
+    }
+
+    suspend fun setMagneticDeclination(degrees: Double) {
+        store.edit { it[KEY_DECLINATION] = degrees }
     }
 }

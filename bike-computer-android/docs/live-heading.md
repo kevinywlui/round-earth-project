@@ -26,9 +26,10 @@ reports **magnetic** north.
 
 ## Next steps
 
-- **True vs magnetic north:** rotation-vector gives magnetic north. Apply
-  declination (reuse the repo's `sunsight` math) for true-north bearing and
-  northing.
+- **True vs magnetic north:** done — see [true-north.md](true-north.md). A
+  manual declination setting converts magnetic to true. (Note: the repo's
+  `sunsight` page computes *solar* declination, a different quantity, so it is
+  not reused.)
 - **Mounting offset:** heading reflects phone orientation; add a calibration
   offset for handlebar mounts not aligned with travel.
 - **Sensor lifecycle:** `HeadingProvider` starts in `BikeApplication.onCreate`

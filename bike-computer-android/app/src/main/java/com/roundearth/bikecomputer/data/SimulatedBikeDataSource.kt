@@ -12,13 +12,15 @@ import kotlin.math.sin
 
 class SimulatedBikeDataSource(
     private val wheelCircumferenceM: () -> Double = { PreferencesStore.DEFAULT_CIRCUMFERENCE },
+    /** Magnetic declination in degrees (positive east); applied to the synthetic bearing. */
+    private val declination: () -> Float = { 0f },
 ) : BikeDataSource {
 
     private val scope = CoroutineScope(SupervisorJob())
     private var job: Job? = null
 
     override val connectionState = MutableStateFlow(ConnectionState.SIMULATED)
-    override val data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0.0))
+    override val data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0f, 0.0))
     private val _readings = Channel<WheelRevolutionReading>(Channel.UNLIMITED)
     override val revolutionReadings = _readings.receiveAsFlow()
 
@@ -34,6 +36,7 @@ class SimulatedBikeDataSource(
                 val circ = wheelCircumferenceM()
                 val speedKph = (21.5 + 6.5 * sin(time * 0.08)).coerceAtLeast(0.0)
                 bearing = (bearing + 0.3f) % 360f
+                val trueBearing = trueFromMagnetic(bearing, declination())
 
                 // Advance the wheel by one second of travel, emitting one reading
                 // per whole revolution so the stream stays lossless like the sensor.
@@ -50,6 +53,7 @@ class SimulatedBikeDataSource(
                             sensorEventTime1024 = ((now * 1024L / 1000L) and 0xFFFF).toInt(),
                             wheelCircumferenceM = circ,
                             headingDegrees = bearing,
+                            trueHeadingDegrees = trueBearing,
                         )
                     )
                 }
@@ -59,6 +63,7 @@ class SimulatedBikeDataSource(
                     speedKph = speedKph,
                     cadenceRpm = wheelRpm,
                     bearingDegrees = bearing,
+                    trueBearingDegrees = trueBearing,
                     odometerKm = cumulativeRevs * circ / 1000.0,
                 )
 
