@@ -44,6 +44,7 @@ class CscBleDataSource(
 
     private val scope = CoroutineScope(SupervisorJob())
     private var staleJob: Job? = null
+    private var headingJob: Job? = null
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -78,6 +79,7 @@ class CscBleDataSource(
         if (scanning || gatt != null) return
         startScan()
         startStaleWatcher()
+        startHeadingTicker()
     }
 
     override fun stop() {
@@ -86,6 +88,8 @@ class CscBleDataSource(
         gatt = null
         staleJob?.cancel()
         staleJob = null
+        headingJob?.cancel()
+        headingJob = null
         prevRevs = -1
         _connectionState.value = ConnectionState.DISCONNECTED
     }
@@ -246,6 +250,23 @@ class CscBleDataSource(
                 if (lastReadingWallClock > 0 && idleMs > 2_500 && _data.value.speedKph != 0.0) {
                     _data.value = _data.value.copy(speedKph = 0.0, cadenceRpm = 0.0)
                 }
+            }
+        }
+    }
+
+    /**
+     * Keeps the live bearing fresh from the compass even while stopped — wheel
+     * notifications (which otherwise carry the heading) only arrive while moving.
+     */
+    private fun startHeadingTicker() {
+        headingJob?.cancel()
+        headingJob = scope.launch {
+            while (true) {
+                val h = heading()
+                if (_data.value.bearingDegrees != h) {
+                    _data.value = _data.value.copy(bearingDegrees = h)
+                }
+                delay(250)
             }
         }
     }

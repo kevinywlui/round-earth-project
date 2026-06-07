@@ -24,9 +24,6 @@ class HeadingProvider(context: Context) : SensorEventListener {
     var degrees: Float = 0f
         private set
 
-    /** Snapshot accessor for callers that want a `() -> Float`. */
-    fun current(): Float = degrees
-
     private val rotationMatrix = FloatArray(9)
     private val orientation = FloatArray(3)
 
