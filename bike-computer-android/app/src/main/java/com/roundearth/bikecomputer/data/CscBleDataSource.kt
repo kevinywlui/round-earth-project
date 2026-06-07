@@ -18,12 +18,11 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -52,8 +51,10 @@ class CscBleDataSource(
     private val _data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0.0))
     override val data: StateFlow<RawBikeData> = _data
 
-    private val _readings = MutableSharedFlow<WheelRevolutionReading>(extraBufferCapacity = 128)
-    override val revolutionReadings = _readings.asSharedFlow()
+    // Unlimited buffer so no revolution is ever dropped — the recorded stream
+    // must stay lossless even if the consumer (DB writes) briefly lags.
+    private val _readings = Channel<WheelRevolutionReading>(Channel.UNLIMITED)
+    override val revolutionReadings = _readings.receiveAsFlow()
 
     private val adapter: BluetoothAdapter? by lazy {
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
@@ -83,7 +84,9 @@ class CscBleDataSource(
         stopScan()
         gatt?.close()
         gatt = null
-        scope.cancel()
+        staleJob?.cancel()
+        staleJob = null
+        prevRevs = -1
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
@@ -95,9 +98,16 @@ class CscBleDataSource(
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
+        try {
+            scanner.startScan(listOf(filter), settings, scanCallback)
+        } catch (e: SecurityException) {
+            // Missing BLUETOOTH_SCAN — caller should have requested it first.
+            Log.e(TAG, "scan blocked: missing permission", e)
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
         scanning = true
         _connectionState.value = ConnectionState.SCANNING
-        scanner.startScan(listOf(filter), settings, scanCallback)
         Log.i(TAG, "scanning for CSC sensor")
     }
 
@@ -190,7 +200,7 @@ class CscBleDataSource(
         val circumference = wheelCircumferenceM()
         val headingDeg = heading()
 
-        _readings.tryEmit(
+        _readings.trySend(
             WheelRevolutionReading(
                 timestampMillis = now,
                 cumulativeRevolutions = revs,

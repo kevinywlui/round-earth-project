@@ -24,6 +24,9 @@ class BikeApplication : Application() {
 
     private val headingProvider: HeadingProvider by lazy { HeadingProvider(this) }
 
+    /** True when the real BLE source is in use (and BLE runtime permissions are needed). */
+    val usesBle: Boolean by lazy { !isEmulator() }
+
     val repository: BikeRepository by lazy {
         val db = BikeDatabase.get(this)
         // Emulators have no BLE radio — fall back to simulated data so the app is

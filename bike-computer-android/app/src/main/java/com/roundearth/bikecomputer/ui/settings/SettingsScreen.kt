@@ -33,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.content.ClipData
 import android.content.Intent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -187,6 +188,9 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                             val share = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/csv"
                                 putExtra(Intent.EXTRA_STREAM, uri)
+                                // clipData ensures the read grant reaches receivers
+                                // that look there instead of EXTRA_STREAM.
+                                clipData = ClipData.newRawUri("bike-data.csv", uri)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             context.startActivity(Intent.createChooser(share, "Export bike data"))

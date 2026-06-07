@@ -6,10 +6,12 @@ import androidx.lifecycle.viewModelScope
 import com.roundearth.bikecomputer.data.BikeRepository
 import com.roundearth.bikecomputer.data.PreferencesStore
 import com.roundearth.bikecomputer.data.db.SessionSummary
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class SettingsUiState(
     val wheelCircumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE,
@@ -49,9 +51,12 @@ class SettingsViewModel(
         viewModelScope.launch { prefs.setUseImperial(imperial) }
     }
 
-    /** Builds the CSV and hands it back via [onReady] for sharing. */
+    /** Builds the CSV off the main thread and hands it back via [onReady] for sharing. */
     fun exportCsv(onReady: (String) -> Unit) {
-        viewModelScope.launch { onReady(repository.exportCsv()) }
+        viewModelScope.launch {
+            val csv = withContext(Dispatchers.IO) { repository.exportCsv() }
+            onReady(csv)
+        }
     }
 
     fun clearHistory() {

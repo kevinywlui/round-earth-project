@@ -42,12 +42,17 @@ class MainActivity : ComponentActivity() {
                     viewModel(factory = SettingsViewModel.Factory(app.prefs, app.repository))
                 val nav = rememberNavController()
 
-                // Request BLE permissions, then start scanning/recording.
+                // Request BLE permissions, then start scanning/recording — but only
+                // start the BLE source once every required permission is granted.
                 val launcher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
-                ) { app.repository.start() }
+                ) { grants ->
+                    if (grants.values.all { it }) app.repository.start()
+                }
 
-                LaunchedEffect(Unit) { launcher.launch(blePermissions) }
+                LaunchedEffect(Unit) {
+                    if (app.usesBle) launcher.launch(blePermissions) else app.repository.start()
+                }
 
                 NavHost(
                     navController = nav,

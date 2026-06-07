@@ -3,11 +3,10 @@ package com.roundearth.bikecomputer.data
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlin.math.sin
 
@@ -20,11 +19,11 @@ class SimulatedBikeDataSource(
 
     override val connectionState = MutableStateFlow(ConnectionState.SIMULATED)
     override val data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0.0))
-    private val _readings = MutableSharedFlow<WheelRevolutionReading>(extraBufferCapacity = 64)
-    override val revolutionReadings = _readings.asSharedFlow()
+    private val _readings = Channel<WheelRevolutionReading>(Channel.UNLIMITED)
+    override val revolutionReadings = _readings.receiveAsFlow()
 
     override fun start() {
-        if (job != null) return
+        if (job?.isActive == true) return
         job = scope.launch {
             var time = 0.0
             var bearing = 45f
@@ -36,14 +35,15 @@ class SimulatedBikeDataSource(
                 val speedKph = (21.5 + 6.5 * sin(time * 0.08)).coerceAtLeast(0.0)
                 bearing = (bearing + 0.3f) % 360f
 
-                // Advance the wheel by one second of travel.
+                // Advance the wheel by one second of travel, emitting one reading
+                // per whole revolution so the stream stays lossless like the sensor.
                 val speedMs = speedKph / 3.6
                 fractionalRevs += speedMs / circ
                 val newWhole = fractionalRevs.toLong()
-                if (newWhole > cumulativeRevs) {
-                    cumulativeRevs = newWhole
+                while (cumulativeRevs < newWhole) {
+                    cumulativeRevs++
                     val now = System.currentTimeMillis()
-                    _readings.tryEmit(
+                    _readings.trySend(
                         WheelRevolutionReading(
                             timestampMillis = now,
                             cumulativeRevolutions = cumulativeRevs,
@@ -69,6 +69,7 @@ class SimulatedBikeDataSource(
     }
 
     override fun stop() {
-        scope.cancel()
+        job?.cancel()
+        job = null
     }
 }
