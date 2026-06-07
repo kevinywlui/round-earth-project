@@ -1,11 +1,16 @@
 package com.roundearth.bikecomputer
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -18,6 +23,14 @@ import com.roundearth.bikecomputer.ui.settings.SettingsViewModel
 import com.roundearth.bikecomputer.ui.theme.BikeComputerTheme
 
 class MainActivity : ComponentActivity() {
+
+    private val blePermissions: Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -25,8 +38,16 @@ class MainActivity : ComponentActivity() {
             BikeComputerTheme {
                 val app = application as BikeApplication
                 val bikeVm: BikeViewModel = viewModel(factory = BikeViewModel.Factory(app.repository))
-                val settingsVm: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory(app.prefs))
+                val settingsVm: SettingsViewModel =
+                    viewModel(factory = SettingsViewModel.Factory(app.prefs, app.repository))
                 val nav = rememberNavController()
+
+                // Request BLE permissions, then start scanning/recording.
+                val launcher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestMultiplePermissions()
+                ) { app.repository.start() }
+
+                LaunchedEffect(Unit) { launcher.launch(blePermissions) }
 
                 NavHost(
                     navController = nav,

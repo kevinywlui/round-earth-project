@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ButtonDefaults
@@ -31,14 +33,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.content.Intent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import java.io.File
 import com.roundearth.bikecomputer.ui.theme.Divider
 import com.roundearth.bikecomputer.ui.theme.Green
 import com.roundearth.bikecomputer.ui.theme.Surface
@@ -59,6 +65,7 @@ private val WHEEL_PRESETS = listOf(
 @Composable
 fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var circumferenceText by remember(state.wheelCircumferenceM) {
         mutableStateOf("%.3f".format(state.wheelCircumferenceM))
     }
@@ -78,7 +85,11 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
             colors = TopAppBarDefaults.topAppBarColors(containerColor = Surface),
         )
 
-        Column(modifier = Modifier.padding(20.dp)) {
+        Column(
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(20.dp),
+        ) {
 
             SectionLabel("UNITS")
             Spacer(Modifier.height(10.dp))
@@ -150,6 +161,50 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit) {
                 }
                 Spacer(Modifier.height(8.dp))
             }
+
+            Spacer(Modifier.height(20.dp))
+            SectionLabel("RECORDED DATA")
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "${state.recordedEventCount} revolution events · ${state.sessions.size} rides",
+                color = TextSecondary,
+                fontSize = 13.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        viewModel.exportCsv { csv ->
+                            val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+                            val file = File(dir, "bike-data.csv")
+                            file.writeText(csv)
+                            val uri = FileProvider.getUriForFile(
+                                context, "${context.packageName}.fileprovider", file,
+                            )
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/csv"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            context.startActivity(Intent.createChooser(share, "Export bike data"))
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                    border = BorderStroke(1.dp, Divider),
+                ) { Text("EXPORT CSV", fontSize = 12.sp) }
+
+                OutlinedButton(
+                    onClick = { viewModel.clearHistory() },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF44336)),
+                    border = BorderStroke(1.dp, Divider),
+                ) { Text("CLEAR", fontSize = 12.sp) }
+            }
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
