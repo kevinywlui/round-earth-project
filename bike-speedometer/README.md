@@ -64,3 +64,33 @@ All configuration is at the top of `speed/speed.ino`:
 | `DEVICE_NAME` | `"Bike Speed"` | BLE name prefix; the last two bytes of the MAC are appended at boot (e.g. `Bike Speed 3F9A`) so multiple units are distinguishable |
 | `SENSOR_PIN` | `D0` | GPIO pin connected to the hall effect sensor |
 | `MIN_MS` | `60` | Minimum milliseconds between triggers (debounce; ~125 km/h ceiling on a 2.1 m wheel) |
+| `WDT_TIMEOUT_S` | `5` | Task-watchdog timeout; reboots if `loop()` stalls (e.g. a wedged BLE stack) |
+| `HEALTH_INTERVAL_MS` | `5000` | How often the serial health line is printed |
+| `DEBUG_VERBOSE` | `1` | `1` logs every revolution; `0` prints only the health line and lifecycle events |
+
+## Diagnostics
+
+Each revolution is captured by the falling-edge ISR into a small lock-free ring buffer
+and drained in `loop()`, so a burst of revolutions between passes is never coalesced into
+a single packet. A task watchdog reboots the sensor if `loop()` hangs, and the boot banner
+reports the **reset reason** so a watchdog reboot or crash is visible after the fact.
+
+Connect at 115200 baud to watch the serial output:
+
+```
+=== Bike Speed booting ===
+reset reason: power-on
+build:        Jun  7 2026 12:40:11
+advertising as: Bike Speed 3F9A
+[event] client connected
+[rev] revs=1 t=1043
+[health] up=5s revs=12 rate=2.4/s drops=0 hwm=2/31 notif=12 conn=1 disc=0 heap=212044
+```
+
+Health fields: `up` uptime (s), `revs` cumulative revolutions, `rate` revolutions/s over
+the last interval, `drops` ring-buffer overflows (distance is still correct — only an
+individual timestamp is lost), `hwm` peak ring-buffer occupancy vs. capacity, `notif` CSC
+packets sent, `conn` link state, `disc` disconnects since boot, `heap` free bytes.
+
+The onboard LED also shows link state: **solid** when a client is connected, **~1 Hz blink**
+while advertising.
