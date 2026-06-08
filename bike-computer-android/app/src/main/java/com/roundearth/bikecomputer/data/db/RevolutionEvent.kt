@@ -28,6 +28,12 @@ data class RevolutionEvent(
     val deltaRevolutions: Long = 0,
     /** Sensor's "last wheel event time" in 1/1024 s units (16-bit, wraps at 64 s). */
     val sensorEventTime1024: Int,
+    /**
+     * Monotonic sensor time in 1/1024 s for jitter-free offline timing; resets to 0 per
+     * connection and bridges segments via [timestampMillis]. The full consumer contract lives
+     * in `CscMeasurementDecoder.Result.cumulativeEventTime1024` and docs/offline-timing.md.
+     */
+    val cumulativeEventTime1024: Long = 0,
     /** Wheel circumference in meters in effect when this event was recorded. */
     val wheelCircumferenceM: Double,
     /**

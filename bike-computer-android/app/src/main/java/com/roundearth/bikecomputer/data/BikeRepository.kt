@@ -66,6 +66,7 @@ class BikeRepository(
                             cumulativeRevolutions = reading.cumulativeRevolutions,
                             deltaRevolutions = reading.deltaRevolutions,
                             sensorEventTime1024 = reading.sensorEventTime1024,
+                            cumulativeEventTime1024 = reading.cumulativeEventTime1024,
                             wheelCircumferenceM = reading.wheelCircumferenceM,
                             // Map the in-memory NaN="unknown" heading to a NULL column: a bound
                             // NaN becomes NULL in SQLite and would fail the NOT NULL constraint.
@@ -115,6 +116,7 @@ class BikeRepository(
                 out.append(e.cumulativeRevolutions.toString()).append(',')
                 out.append(e.deltaRevolutions.toString()).append(',')
                 out.append(e.sensorEventTime1024.toString()).append(',')
+                out.append(e.cumulativeEventTime1024.toString()).append(',')
                 out.append(e.wheelCircumferenceM.toString()).append(',')
                 // Unknown heading is an empty CSV field (NULL), not "NaN" or "0".
                 out.append(e.headingDegrees?.toString() ?: "").append(',')
@@ -129,7 +131,8 @@ class BikeRepository(
     companion object {
         private const val CSV_HEADER =
             "session_id,timestamp_ms,cumulative_revolutions,delta_revolutions," +
-                "sensor_event_time_1024,wheel_circumference_m,heading_degrees,true_heading_degrees\n"
+                "sensor_event_time_1024,cumulative_event_time_1024,wheel_circumference_m," +
+                "heading_degrees,true_heading_degrees\n"
         private const val EXPORT_PAGE_SIZE = 1_000
         // Resume the prior ride if the app restarts within this window of the last event.
         private const val SESSION_RESUME_WINDOW_MS = 30 * 60 * 1000L

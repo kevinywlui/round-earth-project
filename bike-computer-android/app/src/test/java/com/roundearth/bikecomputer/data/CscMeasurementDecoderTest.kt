@@ -138,6 +138,104 @@ class CscMeasurementDecoderTest {
     }
 
     @Test
+    fun monotonicEventTimeAccumulatesAcrossPackets() {
+        val decoder = CscMeasurementDecoder()
+        val first = decoder.decode(wheelPacket(revs = 1000, time = 5000), circumference)
+        assertEquals("first packet is the baseline", 0L, first.cumulativeEventTime1024)
+        val second = decoder.decode(wheelPacket(revs = 1003, time = 5800), circumference)
+        assertEquals(800L, second.cumulativeEventTime1024) // +800 ticks
+        val third = decoder.decode(wheelPacket(revs = 1004, time = 6300), circumference)
+        assertEquals(1300L, third.cumulativeEventTime1024) // +500 more
+    }
+
+    @Test
+    fun monotonicEventTimeUnwrapsThe16BitWrap() {
+        // A real 16-bit wrap within 64 s is precise from the event time alone (no wall clock).
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 10, time = 65000), circumference)
+        val result = decoder.decode(wheelPacket(revs = 12, time = 200), circumference)
+        assertEquals(736L, result.cumulativeEventTime1024) // (200 - 65000) mod 65536
+    }
+
+    @Test
+    fun monotonicEventTimeEstimatesAnAmbiguousGapFromTheWallClock() {
+        // A >64 s stop wraps the event time ambiguously; the accumulator advances by the
+        // wall-clock estimate for that one gap instead, staying monotonic.
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 1000, time = 1000), circumference, receivedAtMs = 10_000L)
+        val result = decoder.decode(wheelPacket(revs = 1001, time = 1052), circumference, receivedAtMs = 74_050L)
+        assertEquals(64_050L * 1024L / 1000L, result.cumulativeEventTime1024)
+    }
+
+    @Test
+    fun monotonicEventTimeKeepsExactDeltaInThe60To64SecondBand() {
+        // A 62 s gap is past the conservative 60 s speed guard but BEFORE the true 64 s wrap,
+        // so the event time has NOT aliased: the accumulator must keep the exact dTicks, not
+        // substitute a coarser wall-clock estimate.
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 1000, time = 1000), circumference, receivedAtMs = 10_000L)
+        // event time advanced exactly 62.0 s = 63488 ticks (< 65536, no 16-bit wrap).
+        val dTicks = 62 * 1024
+        val result = decoder.decode(
+            wheelPacket(revs = 1001, time = 1000 + dTicks),
+            circumference,
+            receivedAtMs = 72_000L, // real gap 62 s: > 60 s guard, < 64 s wrap
+        )
+        assertEquals(dTicks.toLong(), result.cumulativeEventTime1024)
+        assertNull("speed still suppressed by the conservative 60 s guard", result.speedKph)
+    }
+
+    @Test
+    fun monotonicEventTimeEstimatesARebootGapAndStaysMonotonic() {
+        // A reboot (revs jump backward past half-range) makes the event time ambiguous; the
+        // accumulator advances by the wall-clock estimate for that gap and never goes backward.
+        val decoder = CscMeasurementDecoder()
+        decoder.decode(wheelPacket(revs = 1_000_000, time = 1000), circumference, receivedAtMs = 10_000L)
+        val result = decoder.decode(wheelPacket(revs = 5, time = 2000), circumference, receivedAtMs = 15_000L)
+        assertEquals(0L, result.wheelDeltaRevs) // reboot: no false advance
+        assertEquals(5_000L * 1024L / 1000L, result.cumulativeEventTime1024) // wall-clock estimate
+        assertTrue("accumulator stays monotonic across a reboot", result.cumulativeEventTime1024 >= 0L)
+    }
+
+    @Test
+    fun monotonicEventTimeFreezesOnARebootWithNoWallClock() {
+        // With no clock available the reboot gap cannot be estimated; the accumulator must
+        // freeze (advance by 0) rather than go backward or invent time.
+        val decoder = CscMeasurementDecoder()
+        val baseline = decoder.decode(wheelPacket(revs = 1003, time = 5800), circumference)
+        decoder.decode(wheelPacket(revs = 1004, time = 6300), circumference)
+        val before = decoder.decode(wheelPacket(revs = 1005, time = 6800), circumference)
+        val rebooted = decoder.decode(wheelPacket(revs = 5, time = 100), circumference)
+        assertEquals(0L, rebooted.wheelDeltaRevs)
+        assertEquals("frozen, not negative", before.cumulativeEventTime1024, rebooted.cumulativeEventTime1024)
+        assertTrue(rebooted.cumulativeEventTime1024 >= baseline.cumulativeEventTime1024)
+    }
+
+    @Test
+    fun monotonicEventTimeIsPerConnectionAndResetsToZero() {
+        // Load-bearing offline-analysis contract: a reconnect builds a FRESH decoder, so the
+        // accumulator restarts at 0 and a backward jump marks a connection-segment boundary.
+        // This pins the per-instance (not static/companion) semantics: two independent decoders
+        // each produce their own zero-based series, regardless of feed order or large inputs.
+        val a = CscMeasurementDecoder()
+        a.decode(wheelPacket(revs = 1000, time = 5000), circumference)
+        val aSecond = a.decode(wheelPacket(revs = 1003, time = 5800), circumference)
+        assertEquals("first decoder accumulated independently", 800L, aSecond.cumulativeEventTime1024)
+
+        // A second decoder, fed large revs/time, must still start its own series at 0 — proving
+        // the accumulator is not shared across instances.
+        val b = CscMeasurementDecoder()
+        val bFirst = b.decode(wheelPacket(revs = 9_000_000, time = 60000), circumference)
+        assertEquals("fresh decoder restarts at 0 regardless of inputs", 0L, bFirst.cumulativeEventTime1024)
+        val bSecond = b.decode(wheelPacket(revs = 9_000_005, time = 60500), circumference)
+        assertEquals("second decoder accumulates from its own baseline", 500L, bSecond.cumulativeEventTime1024)
+
+        // The first decoder is unaffected by the second's activity.
+        val aThird = a.decode(wheelPacket(revs = 1004, time = 6300), circumference)
+        assertEquals("first decoder unchanged by the second", 1300L, aThird.cumulativeEventTime1024)
+    }
+
+    @Test
     fun emptyAndTruncatedPacketsAreSafe() {
         val decoder = CscMeasurementDecoder()
         val empty = decoder.decode(ByteArray(0), circumference)

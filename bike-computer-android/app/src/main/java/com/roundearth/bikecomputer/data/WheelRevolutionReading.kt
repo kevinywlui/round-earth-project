@@ -11,6 +11,8 @@ data class WheelRevolutionReading(
     /** Revolutions this event advanced by (reboot/rollover-safe; 0 if unknown). */
     val deltaRevolutions: Long,
     val sensorEventTime1024: Int,
+    /** Monotonic accumulated sensor time (1/1024 s) for jitter-free offline timing. */
+    val cumulativeEventTime1024: Long,
     val wheelCircumferenceM: Double,
     /** Heading clockwise from magnetic north [0, 360). */
     val headingDegrees: Float,

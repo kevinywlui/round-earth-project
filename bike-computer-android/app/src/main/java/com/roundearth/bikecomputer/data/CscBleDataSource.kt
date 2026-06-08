@@ -603,14 +603,21 @@ class CscBleDataSource(
 
         private fun handleMeasurement(bytes: ByteArray?) {
             if (bytes == null || bytes.isEmpty()) return
+            // Evict-only-if-still-mine: ignore a late in-flight notification for an old GATT
+            // after this connection was torn down/replaced. The new cumulativeEventTime1024
+            // accumulator resets to 0 per connection, so persisting a stale row (with this
+            // decoder's high accumulated value) after a fresh segment's low values would
+            // interleave the monotonic series and corrupt the offline "non-increasing step =
+            // segment boundary" heuristic. Dropping the stale row is strictly safer.
+            if (!ready || connection.get() !== this) return
             val circumference = wheelCircumferenceM()
             val result = decoder.decode(bytes, circumference, SystemClock.elapsedRealtime())
 
-            // Persist every wheel-flagged packet losslessly for the time-series. In practice
-            // the firmware notifies once per real edge, so deltaRevolutions is normally > 0;
-            // the rare zero-delta row (first packet, or a coasting packet where the count
-            // didn't advance) is kept on purpose — it records sensor liveness / a timestamp
-            // even while stopped, and the DAO's SUM(deltaRevolutions) distance math ignores it.
+            // Persist every wheel-flagged packet losslessly for the time-series. The firmware
+            // notifies strictly once per real edge with no keepalive packets, so deltaRevolutions
+            // is normally > 0; a zero-delta row is only the first packet of a connection or a
+            // sensor reboot. It is kept on purpose — it records the segment baseline / reboot
+            // timestamp — and the DAO's SUM(deltaRevolutions) distance math ignores it.
             result.wheelCumulativeRevs?.let { revs ->
                 val h = heading()
                 _readings.trySend(
@@ -619,6 +626,7 @@ class CscBleDataSource(
                         cumulativeRevolutions = revs,
                         deltaRevolutions = result.wheelDeltaRevs,
                         sensorEventTime1024 = result.wheelEventTime1024 ?: 0,
+                        cumulativeEventTime1024 = result.cumulativeEventTime1024,
                         wheelCircumferenceM = circumference,
                         headingDegrees = h,
                         trueHeadingDegrees = trueFromMagnetic(h, declination()),
