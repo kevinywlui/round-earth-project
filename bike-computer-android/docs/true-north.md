@@ -10,25 +10,27 @@ and every recorded revolution stores both headings.
 - **True heading** = `trueFromMagnetic(magnetic, declination)` =
   `(magnetic + declination) mod 360`, where declination is positive east. The
   shared helper lives in `data/Heading.kt`.
-- **Declination is a manual setting.** The device has no live GPS fix (the
-  location permission is capped at API 30 for BLE scanning only), so the user
-  enters their local declination in Settings → *Magnetic declination*. Default
-  is 0°, so true == magnetic until set. Look-up source:
-  magnetic-declination.com.
+- **Declination has two entry paths.** The manual setting in Settings →
+  *Magnetic declination* is authoritative; default is 0°, so true == magnetic
+  until set (look-up source: magnetic-declination.com). Settings also has an
+  **AUTO-DETECT FROM LOCATION** button: it requests the
+  `ACCESS_COARSE_LOCATION` permission on demand and `DeclinationProvider`
+  computes declination from the device's *last known* fix via the platform
+  `GeomagneticField` (World Magnetic Model, no Play Services). It is a one-shot
+  assist that just pre-fills the manual setting — there is no live location
+  lifecycle, so if there is no recent fix it reports "no fix" and the user opens
+  a maps app once to get one, then retries.
 - **Live state:** `RawBikeData` carries both `bearingDegrees` (magnetic) and
   `trueBearingDegrees`. The heading ticker and per-revolution path update both;
   the ticker still gates on the 1° jitter threshold (now across both values,
   using wrap-aware `angularDistance` so the 0/360 boundary doesn't churn).
-- **Storage:** `RevolutionEvent` keeps the existing `headingDegrees` (magnetic)
-  and adds `trueHeadingDegrees` (DB v3, `MIGRATION_2_3`). The migration backfills
-  legacy rows from `headingDegrees` (old declination unknown, so assumed 0) so
-  historical exports don't show a bogus 0° true heading. CSV export gains a
-  `true_heading_degrees` column. Declination is recoverable as
-  `true − magnetic`, so storage stays lossless even though declination is a
-  mutable preference.
-- **Simulator:** `SimulatedBikeDataSource` applies the same declination to its
-  synthetic bearing, so both compasses and both stored columns are populated on
-  the emulator too.
+- **Storage:** `RevolutionEvent` stores both `headingDegrees` (magnetic) and
+  `trueHeadingDegrees`, and CSV export carries a `true_heading_degrees` column.
+  There is no hand-written Room migration: schema changes use
+  `fallbackToDestructiveMigration()` (a version bump wipes history on purpose —
+  this is a single-user app), so don't expect old rides to survive a schema
+  change. Declination is still recoverable per-row as `true − magnetic`, so the
+  stored data is lossless even though declination is a mutable preference.
 
 ## Why manual, not solar declination
 
@@ -39,9 +41,7 @@ cannot correct a compass, so it is not reused here.
 
 ## Next steps
 
-- **GPS auto-declination:** add a location fix and derive declination from
-  `android.hardware.GeomagneticField(lat, lon, alt, time)` so the user need not
-  enter it. Requires runtime location permission across all SDKs and a location
-  lifecycle.
-- **Mounting offset:** heading still reflects phone orientation, not travel
-  direction; add a calibration offset for handlebar mounts.
+- **Live location for auto-declination:** the current auto-detect reads only the
+  *last known* fix. Requesting a live fix would let it work cold (no maps app
+  needed first), at the cost of a location lifecycle the app currently avoids on
+  purpose.

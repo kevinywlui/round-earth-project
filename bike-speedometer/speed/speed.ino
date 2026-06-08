@@ -11,7 +11,10 @@
 #define MIN_MS       60    // minimum ms between triggers (~16.6 rev/s; ~125 km/h on a 2.1 m wheel)
 #define WDT_TIMEOUT_S      5      // reboot if loop() stalls this long (e.g. a wedged BLE stack)
 #define HEALTH_INTERVAL_MS 5000   // period of the serial health line
-#define DEBUG_VERBOSE      1      // 1 = log every revolution; 0 = only health + lifecycle events
+#define DEBUG_VERBOSE      1      // 1 (default) = log every revolution; 0 = only health +
+                                 // lifecycle events. Verbose is a per-rev Serial.printf on the
+                                 // watchdog-guarded loop() hot path (~16 rev/s ceiling); set it
+                                 // to 0 in the field if the serial load ever becomes a concern.
 
 // Bluetooth CSC (Cycling Speed and Cadence) standard UUIDs
 #define CSC_SERVICE_UUID      "00001816-0000-1000-8000-00805f9b34fb"
@@ -213,6 +216,11 @@ void loop() {
     tail = (uint8_t)((tail + 1) & (RB_SIZE - 1));
     __atomic_store_n(&rbTail, tail, __ATOMIC_RELEASE);
 
+    // The tail was advanced (event consumed) BEFORE this connected-check on purpose: if a
+    // client disconnects mid-drain, remaining buffered events are dropped, not held. That is
+    // intentional and correct — the cumulative count rides in the first packet after
+    // reconnect, restoring distance — and must NOT be changed to retain events: a parked but
+    // disconnected sensor would overflow the ring buffer with stale-timestamped entries.
     if (deviceConnected) {
       notifyCSC(revs, eventTime);
 #if DEBUG_VERBOSE
@@ -227,6 +235,12 @@ void loop() {
   static uint32_t lastHealthRevs = 0;
   unsigned long nowMs = millis();
   if (nowMs - lastHealth >= HEALTH_INTERVAL_MS) {
+    // These ISR-written counters (wheelRevolutions, droppedRevolutions, disconnectCount,
+    // and the uint8_t rbHighWater below) are read here without the acquire/release the
+    // ring-buffer head/tail use. That is fine: they are diagnostic-only, and an aligned
+    // 32-bit (or single-byte) load is atomic on the ESP32-C6, so the worst case is a value
+    // one tick stale in a log line — never a torn read. Do NOT copy this relaxed pattern to
+    // the ring buffer, whose head/tail ordering relative to the data writes matters.
     uint32_t revs = wheelRevolutions;
     float dt = (nowMs - lastHealth) / 1000.0f;
     float rate = dt > 0.0f ? (revs - lastHealthRevs) / dt : 0.0f;

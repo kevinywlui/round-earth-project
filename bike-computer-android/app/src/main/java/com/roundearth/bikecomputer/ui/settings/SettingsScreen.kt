@@ -346,20 +346,26 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
                     onClick = {
                         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
                         val file = File(dir, "bike-data.csv")
-                        viewModel.exportCsv(file) { written ->
-                            val uri = FileProvider.getUriForFile(
-                                context, "${context.packageName}.fileprovider", written,
-                            )
-                            val share = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/csv"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                // clipData ensures the read grant reaches receivers
-                                // that look there instead of EXTRA_STREAM.
-                                clipData = ClipData.newRawUri("bike-data.csv", uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                            context.startActivity(Intent.createChooser(share, "Export bike data"))
-                        }
+                        viewModel.exportCsv(
+                            file,
+                            onReady = { written ->
+                                val uri = FileProvider.getUriForFile(
+                                    context, "${context.packageName}.fileprovider", written,
+                                )
+                                val share = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/csv"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    // clipData ensures the read grant reaches receivers
+                                    // that look there instead of EXTRA_STREAM.
+                                    clipData = ClipData.newRawUri("bike-data.csv", uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(share, "Export bike data"))
+                            },
+                            onError = {
+                                Toast.makeText(context, "Export failed", Toast.LENGTH_SHORT).show()
+                            },
+                        )
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),

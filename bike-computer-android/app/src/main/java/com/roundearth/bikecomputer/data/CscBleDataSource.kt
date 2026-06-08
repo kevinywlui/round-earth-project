@@ -62,14 +62,17 @@ class CscBleDataSource(
     private val context: Context,
     /** Current wheel circumference in meters; read fresh on each revolution. */
     private val wheelCircumferenceM: () -> Double,
-    /** Current compass heading in degrees [0, 360); read fresh on each revolution. */
-    private val heading: () -> Float = { 0f },
+    /** Current compass heading in degrees [0, 360), or NaN when unknown; read fresh on each revolution. */
+    private val heading: () -> Float = { Float.NaN },
     /** Current magnetic declination in degrees (positive east); read fresh per use. */
     private val declination: () -> Float = { 0f },
     /** Address of the sensor the user has chosen to connect to (null if none). */
     private val pairedSensor: Flow<String?> = MutableStateFlow(null),
 ) : BikeDataSource {
 
+    // Process-lifetime scope by design (this is an Application-scoped singleton); it is
+    // never cancelled. Because of that, stop() must cancel EVERY launched job individually
+    // — currently staleJob, headingJob, pairedJob. Add any new job to that list in stop().
     private val scope = CoroutineScope(SupervisorJob())
     private var staleJob: Job? = null
     private var headingJob: Job? = null
@@ -78,7 +81,10 @@ class CscBleDataSource(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
 
-    private val _data = MutableStateFlow(RawBikeData(0.0, 0f, 0f, 0.0))
+    // Seed bearings to NaN ("unknown"), not 0° (= due north): the heading ticker
+    // fills them within ~250 ms, but any consumer reading _data in that window must
+    // see "unknown" rather than a false north. NaN propagates through the UI as "---".
+    private val _data = MutableStateFlow(RawBikeData(0.0, Float.NaN, Float.NaN, 0.0))
     override val data: StateFlow<RawBikeData> = _data
 
     // Unlimited buffer so no revolution is ever dropped — the recorded stream
@@ -125,8 +131,19 @@ class CscBleDataSource(
     private val seen = ConcurrentHashMap<String, DiscoveredSensor>()   // address -> UI model
     // The single live connection (CAS so a concurrent scan callback + paired-flow emission
     // can't both open a GATT client, and a late drop callback can't evict a newer one).
+    //
+    // Ownership contract (four threads mutate this: scan-callback connect, paired-flow
+    // teardown, main-thread stop/onAdapterOff, binder-thread onConnectionStateChange):
+    //  - The slot is CLAIMED (compareAndSet null -> conn) BEFORE connectGatt, and conn.gatt
+    //    is PUBLISHED after the handle comes back; connectIfNeeded re-checks ownership and
+    //    closes the handle itself if a teardown won the slot in that pre-publish window.
+    //  - Every RELEASE path (stop/onAdapterOff/teardown/onConnectionStateChange) must close
+    //    conn.gatt, and only the thread that wins the CAS off the slot owns that close.
     private val connection = AtomicReference<SensorConnection?>(null)
 
+    // Best-effort read of the slot: snapshots connection.get() once, so a concurrent teardown
+    // can only make the result one tick stale (report a just-dropped link as connected, or
+    // vice-versa), never tear or NPE. Same for updateConnectionState() below.
     private fun isConnected(address: String): Boolean =
         connection.get()?.let { it.address == address && it.ready } == true
 
@@ -268,7 +285,10 @@ class CscBleDataSource(
                 address = address,
                 name = name,
                 rssi = result.rssi,
-                paired = address == pairedAddress,
+                // Placeholder: publishDiscovered() is the single authority for `paired`
+                // (it recomputes it on every emission, since pairedAddress can change
+                // without a rescan). The value stored here never reaches the UI.
+                paired = false,
                 connected = isConnected(address),
             )
             publishDiscovered()
@@ -304,6 +324,12 @@ class CscBleDataSource(
             return
         }
         conn.gatt = gatt
+        // Ownership: the slot was claimed (CAS null->conn) BEFORE connectGatt, but a teardown
+        // running on another thread (stop/onAdapterOff/paired-change) can null or replace the
+        // slot in the window before this line publishes conn.gatt — it would then find
+        // conn.gatt == null and close nothing, leaking this live GATT client (one of Android's
+        // few per-app slots). Re-check ownership and close it ourselves if we lost the race.
+        if (connection.get() !== conn) gatt.close()
     }
 
     /** Drops [conn] if it is still the live connection (e.g. the user picked another sensor). */
@@ -343,14 +369,21 @@ class CscBleDataSource(
     }
 
     private fun emitData() {
+        // CAS read-modify-write (not a plain .value = ...) so this binder-thread/seed writer
+        // can't clobber a partial update the heading ticker or stale-speed watcher just
+        // committed. Reading the @Volatile speed/odometer fields inside the lambda also means
+        // a CAS retry under contention re-reads their freshest values. This keeps every _data
+        // writer on the same atomic path — see the invariant documented in live-heading.md.
         val h = heading()
         val t = trueFromMagnetic(h, declination())
-        _data.value = RawBikeData(
-            speedKph = speedKph,
-            bearingDegrees = h,
-            trueBearingDegrees = t,
-            odometerKm = odometerM / 1000.0,
-        )
+        _data.update {
+            it.copy(
+                speedKph = speedKph,
+                bearingDegrees = h,
+                trueBearingDegrees = t,
+                odometerKm = odometerM / 1000.0,
+            )
+        }
     }
 
     /** Zeroes speed when no revolutions arrive (the bike has stopped). */
@@ -383,11 +416,11 @@ class CscBleDataSource(
                 val t = trueFromMagnetic(h, declination())
                 // Atomic compare-and-set; ignore sub-degree sensor jitter so a
                 // stationary phone produces no churn. Returning the same instance
-                // skips the emission (StateFlow dedups equal values).
+                // skips the emission (StateFlow dedups equal values). headingSettled
+                // forces an emit across any NaN<->real transition (its NaN behavior is
+                // pinned in HeadingTest), preserving the "unknown heading" invariant.
                 _data.update {
-                    if (angularDistance(it.bearingDegrees, h) < HEADING_EPSILON_DEG &&
-                        angularDistance(it.trueBearingDegrees, t) < HEADING_EPSILON_DEG
-                    ) it
+                    if (headingSettled(it.bearingDegrees, h, it.trueBearingDegrees, t, HEADING_EPSILON_DEG)) it
                     else it.copy(bearingDegrees = h, trueBearingDegrees = t)
                 }
                 delay(250)
@@ -476,7 +509,11 @@ class CscBleDataSource(
             val circumference = wheelCircumferenceM()
             val result = decoder.decode(bytes, circumference, SystemClock.elapsedRealtime())
 
-            // Persist every wheel revolution losslessly for the time-series.
+            // Persist every wheel-flagged packet losslessly for the time-series. In practice
+            // the firmware notifies once per real edge, so deltaRevolutions is normally > 0;
+            // the rare zero-delta row (first packet, or a coasting packet where the count
+            // didn't advance) is kept on purpose — it records sensor liveness / a timestamp
+            // even while stopped, and the DAO's SUM(deltaRevolutions) distance math ignores it.
             result.wheelCumulativeRevs?.let { revs ->
                 val h = heading()
                 _readings.trySend(

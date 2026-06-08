@@ -71,13 +71,43 @@ class SettingsViewModel(
         viewModelScope.launch { prefs.setHeadingOffset(degrees) }
     }
 
-    /** Streams the CSV to [target] off the main thread, then hands the file to [onReady] for sharing. */
-    fun exportCsv(target: File, onReady: (File) -> Unit) {
+    /**
+     * Streams the CSV off the main thread, then hands the file to [onReady] for sharing.
+     * Writes to a temp file and renames it onto [target] only after a complete write, so a
+     * cancellation mid-export (e.g. the user leaves the screen) can never leave a truncated
+     * "final" file that a later share would silently pick up. [onError] runs (on the caller's
+     * dispatcher) when the export fails so the UI can avoid sharing stale/absent bytes.
+     */
+    fun exportCsv(target: File, onReady: (File) -> Unit, onError: (Throwable) -> Unit = {}) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                target.bufferedWriter().use { writer -> repository.exportCsvTo(writer) }
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val tmp = File(target.parentFile, "${target.name}.tmp")
+                    try {
+                        tmp.bufferedWriter().use { writer -> repository.exportCsvTo(writer) }
+                        // The rename is the commit point. If it fails (target locked by a prior
+                        // share, odd cache filesystem), fall back to a copy so we never hand the
+                        // share sheet a stale or missing "final" file — the exact hole the
+                        // temp-then-rename guard exists to close.
+                        if (!tmp.renameTo(target)) {
+                            // The copy fallback is not atomic: if it throws partway (e.g. disk
+                            // full) it can leave a truncated target. Delete that so a later share
+                            // can't pick up a partial file; onError still surfaces the failure.
+                            try {
+                                tmp.copyTo(target, overwrite = true)
+                            } catch (e: Throwable) {
+                                target.delete()
+                                throw e
+                            }
+                        }
+                    } finally {
+                        // Drop the temp on any exit (success-via-copy, throw, or cancellation)
+                        // so cacheDir doesn't accumulate orphaned .tmp files.
+                        tmp.delete()
+                    }
+                }
             }
-            onReady(target)
+            result.fold(onSuccess = { onReady(target) }, onFailure = onError)
         }
     }
 

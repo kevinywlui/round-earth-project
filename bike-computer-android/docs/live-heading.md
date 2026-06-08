@@ -12,26 +12,24 @@ independent of wheel motion.
   least 1° (`HEADING_EPSILON_DEG`), so sub-degree sensor jitter on a stationary
   phone produces no churn.
 - **Thread safety:** all live-state mutations go through `MutableStateFlow.update`
-  (atomic compare-and-set), so the BLE callback, stale-speed watcher, and heading
-  ticker can write concurrently without clobbering each other.
+  (atomic compare-and-set) — the BLE-callback path (`emitData`), the stale-speed
+  watcher, and the heading ticker all use the CAS, so they can write concurrently
+  without clobbering each other's partial updates.
 - **Lifecycle:** the ticker is a `Job` started in `start()` and cancelled in
   `stop()`, alongside the stale-speed watcher.
 - **Recording:** events still capture `heading()` at the moment of each wheel
   revolution; northward reconstruction is unaffected.
-- **Simulator:** `SimulatedBikeDataSource` animates its own bearing (the emulator
-  has no magnetometer), so it needs no ticker.
 
 Source of north is the rotation-vector sensor via `HeadingProvider`, which
 reports **magnetic** north.
 
-## Next steps
+## Related
 
-- **True vs magnetic north:** done — see [true-north.md](true-north.md). A
-  manual declination setting converts magnetic to true. (Note: the repo's
-  `sunsight` page computes *solar* declination, a different quantity, so it is
-  not reused.)
-- **Mounting offset:** heading reflects phone orientation; add a calibration
-  offset for handlebar mounts not aligned with travel.
-- **Sensor lifecycle:** `HeadingProvider` starts in `BikeApplication.onCreate`
-  and runs for the process lifetime. Consider tying start/stop to the recording
-  session or app foreground state to save power.
+- **True vs magnetic north:** see [true-north.md](true-north.md). A declination
+  setting (manual, or auto-detected from location) converts magnetic to true.
+- **Mounting offset:** `applyMountingOffset` (in `Heading.kt`) corrects for how
+  the phone sits on the mount; calibrate it from Settings.
+- **Sensor lifecycle:** `HeadingProvider` is tied to the app foreground —
+  `BikeApplication` registers a `ProcessLifecycleOwner` observer that
+  start()s/stop()s it (and the BLE source) on foreground/background to save
+  power.

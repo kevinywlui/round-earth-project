@@ -17,6 +17,11 @@ import android.util.Log
  * one-shot "set it and forget it" calibration and a coarse fix is plenty (declination
  * varies slowly over tens of kilometers).
  *
+ * Last-known fixes are spatially coarse-enough but can be stale in TIME: a fix cached
+ * in a previous city would calibrate true-north to the wrong place. So fixes older than
+ * [MAX_FIX_AGE_MS] are rejected, falling back to the "no location" path (null) — an honest
+ * "no fix" beats a confidently-wrong declination for a value the user sets once.
+ *
  * The caller must hold a location permission (COARSE is enough) before calling.
  */
 class DeclinationProvider(private val context: Context) {
@@ -29,9 +34,12 @@ class DeclinationProvider(private val context: Context) {
     fun currentDeclinationDegrees(nowMillis: Long): Float? {
         val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
         val location = try {
-            // Take the freshest fix across all enabled providers (gps/network/passive).
+            // Take the freshest fix across all enabled providers (gps/network/passive),
+            // ignoring any older than MAX_FIX_AGE_MS so we don't calibrate from a fix left
+            // over in a previous location.
             lm.getProviders(true)
                 .mapNotNull { lm.getLastKnownLocation(it) }
+                .filter { nowMillis - it.time <= MAX_FIX_AGE_MS }
                 .maxByOrNull { it.time }
         } catch (e: SecurityException) {
             Log.w(TAG, "location permission missing for declination lookup", e)
@@ -48,5 +56,8 @@ class DeclinationProvider(private val context: Context) {
 
     private companion object {
         const val TAG = "DeclinationProvider"
+        // Reject last-known fixes older than this; a day-old fix is fine spatially for a
+        // city-scale declination but guards against calibrating from a previous trip.
+        const val MAX_FIX_AGE_MS = 24 * 60 * 60 * 1000L
     }
 }

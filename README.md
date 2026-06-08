@@ -1,1 +1,45 @@
 # round-earth-project
+
+A homemade bike computer in two halves: a DIY **wheel-speed sensor** and the
+**Android app** that consumes it.
+
+- **[`bike-speedometer/`](bike-speedometer/README.md)** — ESP32-C6 Arduino
+  firmware. A hall-effect sensor counts wheel revolutions and broadcasts them
+  over BLE using the standard Cycling Speed & Cadence (CSC) profile
+  (wheel-revolution data only). Compatible with any CSC head unit, not just this
+  app.
+- **[`bike-computer-android/`](bike-computer-android/)** — Kotlin + Jetpack
+  Compose app. Connects to one CSC sensor, records a **lossless** per-revolution
+  time-series in Room, and shows speed, odometer, and a magnetic + true-north
+  compass. See its [`docs/`](bike-computer-android/docs/) for the heading and
+  true-north design notes.
+
+## End-to-end data flow
+
+```
+magnet passes hall sensor
+  → ISR timestamps the revolution (lock-free ring buffer, firmware)
+  → CSC Measurement notify over BLE (cumulative revs + 1/1024 s event time)
+  → app decodes the delta (CscMeasurementDecoder)
+  → raw per-revolution event stored in Room (lossless)
+  → speed / distance / heading derived at read time
+```
+
+The sensor only ever reports the cumulative wheel-revolution count and a 16-bit
+event time; **all** speed and distance math happens app-side from those plus the
+configured wheel circumference. Storing the raw events (not pre-aggregated
+speeds) keeps rides re-analyzable later.
+
+## The shared CSC contract
+
+| | |
+|---|---|
+| Service | `0x1816` (Cycling Speed and Cadence) |
+| Measurement characteristic | `0x2A5B`, notify |
+| Packet | 7 bytes: flags `0x01`, uint32 LE cumulative wheel revs, uint16 LE event time (1/1024 s, wraps at 64 s) |
+
+## Out of scope
+
+`sunsight/` is an unrelated web utility (it computes *solar* declination, which
+is a different quantity from the *magnetic* declination the compass uses) and is
+not part of the bike computer.

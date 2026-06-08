@@ -1,6 +1,7 @@
 package com.roundearth.bikecomputer.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,5 +49,43 @@ class HeadingTest {
     @Test
     fun mountingOffsetPreservesUnknownHeading() {
         assertTrue("NaN must stay unknown, not become 0", applyMountingOffset(Float.NaN, 45f).isNaN())
+    }
+
+    /**
+     * The recorded trueHeadingDegrees stays "unknown" when either input is unknown. This
+     * holds only because NaN propagates through `((NaN + d) % 360 + 360) % 360`; a future
+     * normalization-helper rewrite that broke that would silently collapse every persisted
+     * true heading to a real number near 0 (due north). These pin the invariant directly.
+     */
+    @Test
+    fun trueFromMagneticPropagatesUnknownHeading() {
+        assertTrue("unknown magnetic stays unknown", trueFromMagnetic(Float.NaN, 12f).isNaN())
+        assertTrue("unknown declination stays unknown", trueFromMagnetic(90f, Float.NaN).isNaN())
+    }
+
+    private val eps1 = 1f
+
+    /**
+     * The heading ticker's emit gate. Sub-epsilon jitter is "settled" (no emit); larger moves
+     * are not (emit). This is the live-state half of the NaN invariant: it is the gate that
+     * decides whether a fresh bearing reaches the dashboard, so its NaN behavior is pinned
+     * directly here, not just transitively through angularDistance.
+     */
+    @Test
+    fun headingSettledIgnoresSubEpsilonJitterButNotRealMoves() {
+        assertTrue("sub-degree jitter is settled", headingSettled(100f, 100.5f, 110f, 110.4f, eps1))
+        assertFalse("a real magnetic move is not settled", headingSettled(100f, 130f, 110f, 110.2f, eps1))
+        assertFalse("a real true move is not settled", headingSettled(100f, 100.2f, 110f, 140f, eps1))
+    }
+
+    @Test
+    fun headingSettledForcesEmitAcrossUnknownTransitions() {
+        // real -> NaN: the sensor dropped out; must emit so the dashboard shows "---".
+        assertFalse("real to unknown must emit", headingSettled(100f, Float.NaN, 110f, Float.NaN, eps1))
+        // NaN -> real: first reading after unknown must emit so a true bearing appears.
+        assertFalse("unknown to real must emit", headingSettled(Float.NaN, 100f, Float.NaN, 110f, eps1))
+        // NaN -> NaN: angularDistance(NaN, NaN) is NaN and NaN < eps is false, so "settled"
+        // is false. The gate then copies NaN over NaN, leaving the state "unknown" regardless.
+        assertFalse("unknown to unknown is not 'settled' (NaN propagates)", headingSettled(Float.NaN, Float.NaN, Float.NaN, Float.NaN, eps1))
     }
 }

@@ -29,6 +29,24 @@ fun signedAngleDelta(from: Float, to: Float): Float {
 }
 
 /**
+ * True when both the magnetic and true headings have moved less than [epsilonDeg] — i.e.
+ * the live state is "settled" and a re-emission would only be sub-degree jitter.
+ *
+ * NaN handling is load-bearing: `angularDistance` returns NaN whenever an input is NaN,
+ * and `NaN < epsilon` is false, so ANY transition into or out of "unknown" (NaN) reports
+ * NOT settled and therefore forces an emit. That is exactly what the NaN="unknown heading"
+ * invariant needs — a reading dropping to unknown must surface as "---", never be suppressed
+ * into a stale real bearing, and a first real reading after unknown must surface immediately.
+ */
+fun headingSettled(
+    oldMag: Float, newMag: Float,
+    oldTrue: Float, newTrue: Float,
+    epsilonDeg: Float,
+): Boolean =
+    angularDistance(oldMag, newMag) < epsilonDeg &&
+        angularDistance(oldTrue, newTrue) < epsilonDeg
+
+/**
  * Corrects a raw sensor azimuth for how the phone is mounted on the bike. The
  * rotation-vector azimuth reflects the phone's own yaw, which is only the bike's
  * direction of travel if the phone happens to be aligned with it; [offsetDegrees]

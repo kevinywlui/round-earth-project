@@ -10,7 +10,7 @@ A hall effect sensor is mounted on the bike frame/fork and a magnet is attached 
 
 | Part | Notes |
 |------|-------|
-| Seeed XIAO ESP32-C6 | Any ESP32 with BLE will work |
+| Seeed XIAO ESP32-C6 | Any ESP32 with BLE and Arduino core 3.x / IDF 5 — the task-watchdog config API (`esp_task_wdt_config_t`) used here is IDF-5-specific, and the diagnostic relaxed-read reasoning assumes single-core atomicity |
 | A3144 hall effect sensor | Digital output, active low |
 | Small neodymium magnet | Attached to a wheel spoke |
 
@@ -66,7 +66,7 @@ All configuration is at the top of `speed/speed.ino`:
 | `MIN_MS` | `60` | Minimum milliseconds between triggers (debounce; ~125 km/h ceiling on a 2.1 m wheel) |
 | `WDT_TIMEOUT_S` | `5` | Task-watchdog timeout; reboots if `loop()` stalls (e.g. a wedged BLE stack) |
 | `HEALTH_INTERVAL_MS` | `5000` | How often the serial health line is printed |
-| `DEBUG_VERBOSE` | `1` | `1` logs every revolution; `0` prints only the health line and lifecycle events |
+| `DEBUG_VERBOSE` | `0` | `0` (field default) prints only the health line and lifecycle events; `1` (bench bring-up) also logs every revolution |
 
 ## Diagnostics
 
@@ -80,17 +80,27 @@ Connect at 115200 baud to watch the serial output:
 ```
 === Bike Speed booting ===
 reset reason: power-on
-build:        Jun  7 2026 12:40:11
+build:        <compile date/time>
 advertising as: Bike Speed 3F9A
 [event] client connected
-[rev] revs=1 t=1043
+[rev] revs=1 t=1043   # only with DEBUG_VERBOSE=1; omitted at the field default (0)
 [health] up=5s revs=12 rate=2.4/s drops=0 hwm=2/31 notif=12 conn=1 disc=0 heap=212044
 ```
 
 Health fields: `up` uptime (s), `revs` cumulative revolutions, `rate` revolutions/s over
-the last interval, `drops` ring-buffer overflows (distance is still correct — only an
-individual timestamp is lost), `hwm` peak ring-buffer occupancy vs. capacity, `notif` CSC
-packets sent, `conn` link state, `disc` disconnects since boot, `heap` free bytes.
+the last interval, `drops` ring-buffer overflows, `hwm` peak *observed* ring-buffer
+occupancy vs. capacity (an upper bound — the ISR samples occupancy against a tail the
+consumer may have already advanced, so it can only over-report how close you got to the
+cliff, never under-report), `notif` CSC packets sent, `conn` link state, `disc`
+disconnects since boot, `heap` free bytes.
+
+**On `drops`:** distance and the cumulative count are always correct (the ISR increments
+`wheelRevolutions` before enqueuing, so an overflow only loses a *timestamp*, not a count).
+But the companion app's per-revolution time-series is end-to-end lossless **only while
+`drops == 0`** (i.e. `hwm` stays below capacity). A non-zero `drops` means individual
+revolution event-times were coalesced under sustained `loop()` starvation, even though the
+ride's total distance is preserved. In practice `drops` should stay 0; a non-zero value is
+a signal to investigate what stalled the loop.
 
 The onboard LED also shows link state: **solid** when a client is connected, **~1 Hz blink**
 while advertising.

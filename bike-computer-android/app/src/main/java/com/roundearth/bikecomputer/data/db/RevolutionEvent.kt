@@ -30,8 +30,16 @@ data class RevolutionEvent(
     val sensorEventTime1024: Int,
     /** Wheel circumference in meters in effect when this event was recorded. */
     val wheelCircumferenceM: Double,
-    /** Compass heading clockwise from magnetic north [0, 360) at this event. */
+    /**
+     * Compass heading clockwise from magnetic north [0, 360) at this event, or
+     * [Float.NaN] if unknown. NaN means "unknown" and must never be coerced to 0f
+     * (= due north) — no default, so every writer is forced to supply a value.
+     */
     val headingDegrees: Float,
-    /** Heading clockwise from true (geographic) north [0, 360) = magnetic + declination. */
-    val trueHeadingDegrees: Float = 0f,
+    /**
+     * Heading clockwise from true (geographic) north [0, 360) = magnetic + declination,
+     * or [Float.NaN] if unknown. Same NaN="unknown, never 0f/north" invariant as
+     * [headingDegrees]; no default for the same reason.
+     */
+    val trueHeadingDegrees: Float,
 )

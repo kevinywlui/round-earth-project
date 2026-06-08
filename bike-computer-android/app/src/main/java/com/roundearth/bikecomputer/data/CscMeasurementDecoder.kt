@@ -37,8 +37,10 @@ class CscMeasurementDecoder {
     /**
      * @param receivedAtMs wall-clock (monotonic, e.g. elapsedRealtime) at which this
      *   packet arrived, used to detect when the 16-bit event time has wrapped. Pass
-     *   [NO_TIMESTAMP] (the default) when no clock is available; speed is then derived
-     *   from the event-time delta alone.
+     *   [NO_TIMESTAMP] only when no clock is available; doing so **disables the 64 s
+     *   wrap guard**, so a long coast that aliases into a tiny dTicks then yields a
+     *   large false speed. Production callers must always pass a real clock; the
+     *   default exists only for tests that exercise the no-clock path deliberately.
      */
     fun decode(data: ByteArray, circumferenceMeters: Double, receivedAtMs: Long = NO_TIMESTAMP): Result {
         if (data.isEmpty()) return Result()

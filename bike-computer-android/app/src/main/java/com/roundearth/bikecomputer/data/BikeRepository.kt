@@ -24,11 +24,12 @@ class BikeRepository(
     private val scope: CoroutineScope,
 ) {
     /**
-     * Identifies the current ride; all events recorded this run share it. Resolved on
-     * [start]: a recent prior session (e.g. after a mid-ride process restart) is resumed
-     * rather than splitting the ride into two.
+     * Identifies the current ride; all events recorded this run share it. The real value is
+     * assigned by [resolveSessionId] at the top of [start] before any event is recorded — a
+     * recent prior session (e.g. after a mid-ride process restart) is resumed rather than
+     * splitting the ride in two. The 0L initializer is an inert placeholder, never observed.
      */
-    private var sessionId: Long = System.currentTimeMillis()
+    private var sessionId: Long = 0L
     private var recordingJob: Job? = null
 
     val connectionState: Flow<ConnectionState> = source.connectionState
@@ -51,7 +52,10 @@ class BikeRepository(
         if (recordingJob == null) {
             recordingJob = scope.launch {
                 // Resolve the session and seed the live odometer before collecting, so a
-                // resumed ride continues from its prior distance instead of zero.
+                // resumed ride continues from its prior distance instead of zero. The seed is
+                // non-zero only when resolveSessionId() resumed a prior session (a restart
+                // within SESSION_RESUME_WINDOW_MS); that constant is the single knob deciding
+                // whether a mid-ride restart continues the odometer or zeroes it.
                 sessionId = resolveSessionId()
                 source.seedOdometer(dao.sessionDistanceMeters(sessionId) ?: 0.0)
                 source.revolutionReadings.collect { reading ->
