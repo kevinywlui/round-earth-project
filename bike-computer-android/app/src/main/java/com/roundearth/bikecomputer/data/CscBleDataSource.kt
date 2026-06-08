@@ -13,7 +13,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
@@ -95,6 +98,19 @@ class CscBleDataSource(
     @Volatile private var pairedAddresses: Set<String> = emptySet()
     private var scanning = false
 
+    // True between start() and stop(): the caller wants the source live. Kept independent
+    // of the adapter being on, so the Bluetooth-state receiver knows whether to revive
+    // scanning when BT is toggled back on.
+    @Volatile private var wantRunning = false
+    private var receiverRegistered = false
+
+    // Per-address reconnect backoff. A failed/abandoned attempt arms a cooldown so the
+    // continuous scan can't hot-loop retries (the classic Android status-133 flap, or a
+    // null connectGatt). Cleared once a sensor is confirmed subscribed. Both maps are
+    // touched from binder threads (GATT callbacks) and the scan callback, hence concurrent.
+    private val nextAttemptAt = ConcurrentHashMap<String, Long>() // address -> elapsedRealtime gate
+    private val failureCount = ConcurrentHashMap<String, Int>()   // address -> consecutive failures
+
     // Merged live state across all connected sensors. Multiple GATT callbacks run on
     // binder threads, so every read-modify-write of this state is guarded by [stateLock]
     // (a plain volatile `+=` would lose updates under concurrent sensors).
@@ -117,13 +133,12 @@ class CscBleDataSource(
     private val connections = ConcurrentHashMap<String, SensorConnection>() // address -> live connection
 
     override fun start() {
-        val adapter = adapter
-        if (adapter == null || !adapter.isEnabled) {
-            Log.w(TAG, "Bluetooth unavailable or disabled")
-            _connectionState.value = ConnectionState.DISCONNECTED
-            return
-        }
-        if (scanning) return
+        if (wantRunning) return // idempotent: onForeground() may re-enter while already live
+        wantRunning = true
+
+        // These don't depend on the Bluetooth adapter, and the receiver must be live so a
+        // start() issued while BT is off still recovers once the user turns it on.
+        registerBtStateReceiver()
         pairedJob = scope.launch {
             pairedSensors.collect { paired ->
                 pairedAddresses = paired
@@ -133,19 +148,91 @@ class CscBleDataSource(
                 updateConnectionState()
             }
         }
-        startScan()
         startStaleWatcher()
         startHeadingTicker()
+
+        val adapter = adapter
+        if (adapter == null || !adapter.isEnabled) {
+            // Not fatal: the BT-state receiver starts scanning once the adapter turns on.
+            Log.w(TAG, "Bluetooth disabled; waiting for it to turn on")
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
+        startScan()
     }
 
     override fun stop() {
+        wantRunning = false
+        unregisterBtStateReceiver()
         stopScan()
         connections.values.forEach { it.gatt?.close() }
         connections.clear()
+        nextAttemptAt.clear()
+        failureCount.clear()
         staleJob?.cancel(); staleJob = null
         headingJob?.cancel(); headingJob = null
         pairedJob?.cancel(); pairedJob = null
         _connectionState.value = ConnectionState.DISCONNECTED
+    }
+
+    // --- Bluetooth adapter on/off recovery (b) ---
+
+    private val btStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_ON -> {
+                    Log.i(TAG, "Bluetooth turned on")
+                    if (wantRunning && !scanning) {
+                        // Fresh start: a deliberate toggle shouldn't inherit stale backoff.
+                        nextAttemptAt.clear()
+                        failureCount.clear()
+                        startScan()
+                    }
+                }
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                    Log.w(TAG, "Bluetooth turning off; tearing down BLE")
+                    onAdapterOff()
+                }
+            }
+        }
+    }
+
+    private fun registerBtStateReceiver() {
+        if (receiverRegistered) return
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        // ACTION_STATE_CHANGED is a protected system broadcast; NOT_EXPORTED is correct and
+        // required on API 33+ for context-registered receivers.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(btStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(btStateReceiver, filter)
+        }
+        receiverRegistered = true
+    }
+
+    private fun unregisterBtStateReceiver() {
+        if (!receiverRegistered) return
+        // Guard against "Receiver not registered" if the system already reclaimed it.
+        runCatching { context.unregisterReceiver(btStateReceiver) }
+        receiverRegistered = false
+    }
+
+    /**
+     * The adapter went down: drop scanning and every GATT link, but keep [wantRunning] so
+     * the STATE_ON handler revives everything. The scanner instance is invalid once the
+     * adapter is off, so we flip [scanning] directly rather than calling into it.
+     */
+    private fun onAdapterOff() {
+        scanning = false
+        connections.values.forEach { it.gatt?.close() }
+        connections.clear()
+        nextAttemptAt.clear()
+        failureCount.clear()
+        seen.keys.forEach { addr -> seen[addr]?.let { seen[addr] = it.copy(connected = false) } }
+        publishDiscovered()
+        updateConnectionState()
     }
 
     private fun startScan() {
@@ -201,6 +288,10 @@ class CscBleDataSource(
     }
 
     private fun connectIfNeeded(address: String) {
+        // Honour the reconnect backoff: while an address is cooling down after a failed
+        // attempt, ignore scan results for it so we don't hot-loop into the same failure.
+        val gateAt = nextAttemptAt[address]
+        if (gateAt != null && SystemClock.elapsedRealtime() < gateAt) return
         val device = devices[address] ?: return
         val conn = SensorConnection(address)
         // Claim the slot atomically so a concurrent scan callback + paired-flow
@@ -211,12 +302,29 @@ class CscBleDataSource(
         if (gatt == null) {
             // connectGatt can return null (BT briefly unavailable, GATT client limit,
             // stale handle). Don't leave a zombie entry that blocks every reconnect —
-            // drop it so the next scan result retries.
-            Log.w(TAG, "connectGatt returned null for $address; will retry on next scan")
+            // drop it and arm a backoff so the next scan result retries with a delay.
+            Log.w(TAG, "connectGatt returned null for $address; backing off")
             connections.remove(address, conn)
+            recordFailure(address)
             return
         }
         conn.gatt = gatt
+    }
+
+    /** Arms an exponential backoff after a failed/abandoned attempt for [address]. */
+    private fun recordFailure(address: String) {
+        val failures = (failureCount[address] ?: 0) + 1
+        failureCount[address] = failures
+        val delay = backoffDelayMs(failures)
+        nextAttemptAt[address] = SystemClock.elapsedRealtime() + delay
+        Log.w(TAG, "connect attempt $failures for $address failed; retrying in ${delay}ms")
+    }
+
+    /** Clears backoff once [address] is confirmed healthy (subscribed), so a later drop
+     *  reconnects promptly instead of inheriting an old penalty. */
+    private fun recordSuccess(address: String) {
+        failureCount.remove(address)
+        nextAttemptAt.remove(address)
     }
 
     private fun disconnect(address: String) {
@@ -322,6 +430,7 @@ class CscBleDataSource(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.w(TAG, "disconnected $address (status=$status)")
+                    val wasReady = ready
                     g.close()
                     ready = false
                     // Only evict the map entry if it is still THIS connection: after a
@@ -330,6 +439,10 @@ class CscBleDataSource(
                     if (connections.remove(address, this)) {
                         // Continuous scanning will rediscover and reconnect if still paired.
                         markConnected(address, false)
+                        // A drop before we ever subscribed is a flap (e.g. status 133): back
+                        // off so the scan doesn't immediately retry into the same failure. A
+                        // drop after a healthy subscription gets no penalty — reconnect fast.
+                        if (wasReady) recordSuccess(address) else recordFailure(address)
                     }
                 }
             }
@@ -362,6 +475,7 @@ class CscBleDataSource(
                 return
             }
             ready = true
+            recordSuccess(address)
             markConnected(address, true)
             Log.i(TAG, "subscribed to $address")
         }
@@ -428,6 +542,20 @@ class CscBleDataSource(
         private const val STALE_MS = 2_500L
         // Minimum heading change (degrees) that warrants a live update.
         private const val HEADING_EPSILON_DEG = 1f
+
+        // Reconnect backoff: 500ms, 1s, 2s, 4s, ... doubling per consecutive failure,
+        // capped at 30s. Shift is bounded so the doubling can't overflow.
+        private const val BASE_BACKOFF_MS = 500L
+        private const val MAX_BACKOFF_MS = 30_000L
+        private const val MAX_BACKOFF_SHIFT = 16
+
+        /** Backoff delay for the Nth consecutive failure (1-based). Pure, for unit testing. */
+        fun backoffDelayMs(failures: Int): Long {
+            if (failures <= 0) return 0L
+            val shift = (failures - 1).coerceAtMost(MAX_BACKOFF_SHIFT)
+            return (BASE_BACKOFF_MS shl shift).coerceAtMost(MAX_BACKOFF_MS)
+        }
+
         private val CSC_SERVICE_UUID = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb")
         private val CSC_MEASUREMENT_UUID = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
