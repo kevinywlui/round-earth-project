@@ -36,7 +36,13 @@ speeds) keeps rides re-analyzable later.
 |---|---|
 | Service | `0x1816` (Cycling Speed and Cadence) |
 | Measurement characteristic | `0x2A5B`, notify |
+| Feature characteristic | `0x2A5C`, read; 16-bit LE, bit 0 = wheel-revolution data supported |
 | Packet | 7 bytes: flags `0x01`, uint32 LE cumulative wheel revs, uint16 LE event time (1/1024 s, wraps at 64 s) |
+
+After subscribing, the app reads the Feature characteristic to confirm bit 0 is
+set; if it is explicitly clear (a non-wheel CSC sensor that can't drive speed),
+the picker shows a "no wheel-speed data" warning. An unread/failed read stays
+silent.
 
 The firmware also exposes a standard **Device Information Service** (`0x180A`):
 Manufacturer `0x2A29`, Model `0x2A24`, and Firmware Revision `0x2A26` (the

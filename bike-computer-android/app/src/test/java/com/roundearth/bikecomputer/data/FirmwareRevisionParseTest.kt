@@ -87,4 +87,22 @@ class FirmwareRevisionParseTest {
         assertEquals(true, next.connected)  // fresh connection state
         assertEquals("2.3", next.firmwareRevision)
     }
+
+    @Test
+    fun wheelSupportedSurvivesARescan() {
+        // setWheelSupported leans on this carry-forward as its sole race-safety mechanism
+        // against the continuous scan-callback rebuild: a confirmed-false (foreign non-wheel
+        // CSC sensor) must keep warning even as fresh advertisement packets re-seen the entry,
+        // rather than flickering the "no wheel-speed data" warning off on every packet.
+        val unsupported = DiscoveredSensor("AA:BB", "Bike Speed", -60, paired = false, connected = true, wheelSupported = false)
+        assertEquals(false, merge(unsupported).wheelSupported)
+        val supported = unsupported.copy(wheelSupported = true)
+        assertEquals(true, merge(supported).wheelSupported)
+    }
+
+    @Test
+    fun firstSightHasNoWheelSupported() {
+        // No prior entry (first advertisement, before the post-subscribe feature read): unknown.
+        assertNull(merge(null).wheelSupported)
+    }
 }

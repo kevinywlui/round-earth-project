@@ -45,6 +45,13 @@ data class DiscoveredSensor(
     val connected: Boolean,
     /** Firmware revision read from the Device Information Service once connected, or null. */
     val firmwareRevision: String? = null,
+    /**
+     * Tri-state wheel-revolution support from the CSC Feature characteristic:
+     * `null` = unknown (not yet read, read failed, or old firmware without the characteristic),
+     * `false` = explicitly unsupported (can't drive speed/distance — wrong kind of sensor),
+     * `true` = confirmed supported. The picker warns only on an explicit `false`.
+     */
+    val wheelSupported: Boolean? = null,
 )
 
 /**
@@ -346,6 +353,18 @@ class CscBleDataSource(
         updateConnectionState()
     }
 
+    /** Records whether a sensor's CSC Feature characteristic advertises wheel-rev support. */
+    private fun setWheelSupported(address: String, bytes: ByteArray?) {
+        val supported = parseWheelSupported(bytes) ?: return
+        if (!supported) {
+            Log.w(TAG, "sensor $address does not advertise CSC wheel-revolution support")
+        }
+        // computeIfPresent + mergeScanResult's carry-forward keep this atomic and safe against
+        // the scan-callback rebuild, exactly as for firmware revision — see setFirmwareRevision.
+        seen.computeIfPresent(address) { _, s -> s.copy(wheelSupported = supported) }
+        publishDiscovered()
+    }
+
     /** Records the firmware revision read from a sensor's Device Information Service. */
     private fun setFirmwareRevision(address: String, bytes: ByteArray?) {
         val rev = parseFirmwareRevision(bytes) ?: return
@@ -507,31 +526,32 @@ class CscBleDataSource(
             markConnected(address, true)
             Log.i(TAG, "subscribed to $address")
 
-            // Best-effort: now that we're subscribed (the priority), read the firmware
-            // revision from the optional Device Information Service. Old firmware without
-            // a DIS simply has no such characteristic, and we skip it silently.
-            val fwChar = g.getService(DIS_SERVICE_UUID)?.getCharacteristic(FIRMWARE_REVISION_UUID)
-            if (fwChar != null && !g.readCharacteristic(fwChar)) {
-                Log.w(TAG, "could not start firmware-revision read for $address")
+            // Now that we're subscribed (the priority), read two optional characteristics —
+            // one GATT read may be in flight at a time, so they CHAIN in onRead(): first the
+            // CSC Feature (confirm wheel-rev support), then the Device Information firmware
+            // revision. If the feature read can't start, skip straight to the firmware read.
+            // (A feature read that starts but whose callback never arrives simply defers the
+            // firmware read to the next clean reconnect — acceptable for best-effort reads.)
+            if (!startRead(g, CSC_SERVICE_UUID, CSC_FEATURE_UUID)) readFirmwareRevision(g)
+        }
+
+        /** Reads the optional DIS firmware revision; logs if the sensor has no such characteristic. */
+        private fun readFirmwareRevision(g: BluetoothGatt) {
+            if (!startRead(g, DIS_SERVICE_UUID, FIRMWARE_REVISION_UUID)) {
+                Log.w(TAG, "no firmware-revision characteristic to read on $address")
             }
         }
 
-        // Unlike onConnectionStateChange, the read path is intentionally NOT ownership-gated
-        // (no compareAndSet(this) check): setFirmwareRevision is keyed on address and uses
-        // computeIfPresent, so a late/stale read after a fast flap only ever updates the
-        // correct row by address — it can never corrupt another connection's entry.
+        /** Starts a characteristic read; false if it's absent or the read didn't start. */
+        private fun startRead(g: BluetoothGatt, service: UUID, characteristic: UUID): Boolean {
+            val ch = g.getService(service)?.getCharacteristic(characteristic) ?: return false
+            return g.readCharacteristic(ch)
+        }
+
         @Deprecated("Deprecated in API 33; the ByteArray overload is used there")
         @Suppress("DEPRECATION")
         override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            if (c.uuid != FIRMWARE_REVISION_UUID) return
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                setFirmwareRevision(address, c.value)
-            } else {
-                // A read that started then failed (vs. old firmware with no DIS, which
-                // never starts a read) leaves firmwareRevision null; log so the two cases
-                // are distinguishable. It refills on the next reconnect, so no retry.
-                Log.w(TAG, "firmware-revision read for $address failed: status=$status")
-            }
+            onRead(g, c.uuid, c.value, status)
         }
 
         // API 33+ overload.
@@ -540,12 +560,33 @@ class CscBleDataSource(
             c: BluetoothGattCharacteristic,
             value: ByteArray,
             status: Int,
-        ) {
-            if (c.uuid != FIRMWARE_REVISION_UUID) return
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                setFirmwareRevision(address, value)
-            } else {
-                Log.w(TAG, "firmware-revision read for $address failed: status=$status")
+        ) = onRead(g, c.uuid, value, status)
+
+        /**
+         * Dispatches a completed read and chains the next one. Intentionally NOT
+         * ownership-gated (no compareAndSet(this) check): the setters are keyed on address
+         * and use computeIfPresent, so a late/stale read after a fast flap only ever updates
+         * the correct row by address — it can never corrupt another connection's entry.
+         */
+        private fun onRead(g: BluetoothGatt, uuid: UUID, value: ByteArray?, status: Int) {
+            when (uuid) {
+                CSC_FEATURE_UUID -> {
+                    if (status == BluetoothGatt.GATT_SUCCESS) setWheelSupported(address, value)
+                    else Log.w(TAG, "CSC feature read for $address failed: status=$status")
+                    readFirmwareRevision(g) // chain regardless of the feature outcome
+                }
+                FIRMWARE_REVISION_UUID -> {
+                    if (status == BluetoothGatt.GATT_SUCCESS) setFirmwareRevision(address, value)
+                    // A read that started then failed (vs. old firmware with no DIS, which
+                    // never starts a read) leaves firmwareRevision null; log so the two cases
+                    // are distinguishable. It refills on the next reconnect, so no retry.
+                    else Log.w(TAG, "firmware-revision read for $address failed: status=$status")
+                }
+                // Only the two reads above are ever issued. An unexpected UUID here means a
+                // future read was added without a matching arm to kick the next step. The log
+                // surfaces the mistake; the chain still stops here, so the new read must add its
+                // own arm that kicks whatever should follow it.
+                else -> Log.w(TAG, "unexpected characteristic read for $address: $uuid")
             }
         }
 
@@ -613,7 +654,19 @@ class CscBleDataSource(
 
         private val CSC_SERVICE_UUID = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb")
         private val CSC_MEASUREMENT_UUID = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb")
+        private val CSC_FEATURE_UUID = UUID.fromString("00002a5c-0000-1000-8000-00805f9b34fb")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        /**
+         * Whether a CSC Feature value (16-bit little-endian, characteristic 0x2A5C) advertises
+         * wheel-revolution support (bit 0), or null if the value is missing/too short. The app
+         * only consumes wheel data, so a sensor without this bit can't drive speed/distance.
+         */
+        internal fun parseWheelSupported(bytes: ByteArray?): Boolean? {
+            if (bytes == null || bytes.size < 2) return null
+            val feature = (bytes[0].toInt() and 0xFF) or ((bytes[1].toInt() and 0xFF) shl 8)
+            return (feature and 0x0001) != 0
+        }
 
         // Device Information Service (read once after connecting, optional on the sensor).
         private val DIS_SERVICE_UUID = UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
@@ -656,6 +709,7 @@ class CscBleDataSource(
             paired = false,
             connected = connected,
             firmwareRevision = prev?.firmwareRevision,
+            wheelSupported = prev?.wheelSupported,
         )
     }
 }

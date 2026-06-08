@@ -34,11 +34,13 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.roundearth.bikecomputer.data.DiscoveredSensor
 import com.roundearth.bikecomputer.ui.theme.Background
+import com.roundearth.bikecomputer.ui.theme.DimGreen
 import com.roundearth.bikecomputer.ui.theme.Divider
 import com.roundearth.bikecomputer.ui.theme.Green
 import com.roundearth.bikecomputer.ui.theme.Surface
 import com.roundearth.bikecomputer.ui.theme.TextPrimary
 import com.roundearth.bikecomputer.ui.theme.TextSecondary
+import com.roundearth.bikecomputer.ui.theme.Warn
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -102,6 +104,11 @@ private fun SensorRow(sensor: DiscoveredSensor, onClick: () -> Unit) {
             sensor.firmwareRevision?.let { fw ->
                 Text("fw $fw", color = TextSecondary, fontSize = 11.sp)
             }
+            // Only an explicit `false` warns; `null` (unread / read failed / old firmware
+            // with no Feature characteristic) stays silent — see DiscoveredSensor.wheelSupported.
+            if (sensor.wheelSupported == false) {
+                Text("⚠ no wheel-speed data", color = Warn, fontSize = 11.sp)
+            }
         }
         StatusChip(sensor)
     }
@@ -110,6 +117,9 @@ private fun SensorRow(sensor: DiscoveredSensor, onClick: () -> Unit) {
 @Composable
 private fun StatusChip(sensor: DiscoveredSensor) {
     val (text, color) = when {
+        // Connected but confirmed not a wheel sensor: dim the green so the CONNECTED chip
+        // doesn't visually contradict the red "no wheel-speed data" warning on the same row.
+        sensor.connected && sensor.wheelSupported == false -> "● CONNECTED" to DimGreen
         sensor.connected -> "● CONNECTED" to Green
         sensor.paired -> "◌ PAIRED" to TextSecondary
         else -> "+ PAIR" to TextPrimary
