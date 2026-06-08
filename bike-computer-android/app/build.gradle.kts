@@ -59,6 +59,16 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            // Mockito 5's default inline mock-maker (used to mock the final android.bluetooth.*
+            // classes in the Tier-2 BLE tests) self-attaches a Byte Buddy agent; JDK 21 warns
+            // and may fail without this flag. See docs/testing-plan.md §3.
+            all { it.jvmArgs("-XX:+EnableDynamicAgentLoading") }
+        }
+    }
 }
 
 dependencies {
@@ -80,4 +90,14 @@ dependencies {
     ksp("androidx.room:room-compiler:2.6.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // Tier 1 JVM tests: in-memory Room exercised under a Robolectric runtime, with
+    // coroutines-test driving the suspend DAO and the repository's collect loop.
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation("androidx.room:room-testing:2.6.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    // Tier 2 BLE state-machine tests: Mockito 5's default inline mock-maker mocks the
+    // final android.bluetooth.* classes; the test drives the captured BluetoothGattCallback.
+    testImplementation("org.mockito:mockito-core:5.14.2")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
 }

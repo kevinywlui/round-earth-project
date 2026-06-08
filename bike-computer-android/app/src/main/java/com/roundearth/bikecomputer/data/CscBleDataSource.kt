@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -121,7 +122,8 @@ class CscBleDataSource(
     // Reconnect backoff (the state machine that throttles status-133 flaps, null
     // connectGatt, and unconfirmed CCCD writes). Extracted so its rules are unit tested
     // in ReconnectPolicyTest; it reads the same monotonic clock used everywhere here.
-    private val reconnect = ReconnectPolicy { SystemClock.elapsedRealtime() }
+    @VisibleForTesting
+    internal val reconnect = ReconnectPolicy { SystemClock.elapsedRealtime() }
 
     // Live state. GATT callbacks run on binder threads, so read-modify-writes of the
     // odometer go through [stateLock]; the rest are plain volatiles (single writer each).
@@ -286,20 +288,8 @@ class CscBleDataSource(
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
-            val address = device.address
-            devices[address] = device
             // scanRecord.deviceName comes from the advertisement (no CONNECT needed).
-            val name = result.scanRecord?.deviceName ?: address
-            // compute() folds the read-of-prior-entry into the atomic mutation, so a
-            // concurrent setFirmwareRevision (on the GATT binder thread) can't be lost:
-            // re-seeing the advertisement preserves a firmware revision already read this
-            // session instead of clobbering it back to null.
-            val connected = isConnected(address)
-            seen.compute(address) { _, prev ->
-                mergeScanResult(prev, address, name, result.rssi, connected)
-            }
-            publishDiscovered()
-            if (address == pairedAddress) connectIfNeeded(address)
+            handleScan(device, result.scanRecord?.deviceName ?: device.address, result.rssi)
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -308,6 +298,39 @@ class CscBleDataSource(
             updateConnectionState()
         }
     }
+
+    /** Records a sighting and connects if it's the paired sensor. Shared by the real scan
+     *  callback and the test hook so both take the exact same path into [connectIfNeeded]. */
+    private fun handleScan(device: BluetoothDevice, name: String, rssi: Int) {
+        val address = device.address
+        devices[address] = device
+        // compute() folds the read-of-prior-entry into the atomic mutation, so a concurrent
+        // setFirmwareRevision (on the GATT binder thread) can't be lost: re-seeing the
+        // advertisement preserves a firmware revision already read this session.
+        val connected = isConnected(address)
+        seen.compute(address) { _, prev -> mergeScanResult(prev, address, name, rssi, connected) }
+        publishDiscovered()
+        if (address == pairedAddress) connectIfNeeded(address)
+    }
+
+    // --- Test seams (Approach C, docs/testing-plan.md §2a). The BLE state machine is
+    // otherwise unreachable from a JVM test: scanning and pairing happen on the internal
+    // scope behind the system scanner. These let a test feed a sighting, set the paired
+    // address, and read the single-connection slot — without a real radio. ---
+
+    /** Feed a scan sighting (bypassing the system scanner) with a Mockito-mocked device. */
+    @VisibleForTesting
+    internal fun onScanResultForTest(device: BluetoothDevice, name: String, rssi: Int) =
+        handleScan(device, name, rssi)
+
+    /** Set the paired address directly (the production path collects it on the internal scope). */
+    @VisibleForTesting
+    internal fun pairForTest(address: String?) { pairedAddress = address }
+
+    /** The live connection's GATT callback (the captured [SensorConnection]), or null. Upcast
+     *  so the private inner type stays private. */
+    @VisibleForTesting
+    internal fun connectionCallbackForTest(): BluetoothGattCallback? = connection.get()
 
     private fun connectIfNeeded(address: String) {
         // Honour the reconnect backoff: while the sensor is cooling down after a failed
