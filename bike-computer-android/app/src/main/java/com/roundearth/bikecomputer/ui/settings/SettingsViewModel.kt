@@ -18,6 +18,7 @@ data class SettingsUiState(
     val wheelCircumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE,
     val useImperial: Boolean = false,
     val magneticDeclinationDeg: Double = PreferencesStore.DEFAULT_DECLINATION,
+    val headingOffsetDeg: Double = PreferencesStore.DEFAULT_HEADING_OFFSET,
     val recordedEventCount: Int = 0,
     val sessions: List<SessionSummary> = emptyList(),
 )
@@ -27,17 +28,24 @@ class SettingsViewModel(
     private val repository: BikeRepository,
 ) : ViewModel() {
 
+    // Fold the two repository flows into a pair so this stays within the 5-arg typed
+    // combine; the prefs make up the other four.
+    private val recorded = combine(repository.recordedEventCount, repository.sessions) { count, sessions ->
+        count to sessions
+    }
+
     val uiState = combine(
         prefs.wheelCircumferenceMeters,
         prefs.useImperial,
         prefs.magneticDeclinationDeg,
-        repository.recordedEventCount,
-        repository.sessions,
-    ) { circumference, imperial, declination, count, sessions ->
+        prefs.headingOffsetDeg,
+        recorded,
+    ) { circumference, imperial, declination, offset, (count, sessions) ->
         SettingsUiState(
             wheelCircumferenceM = circumference,
             useImperial = imperial,
             magneticDeclinationDeg = declination,
+            headingOffsetDeg = offset,
             recordedEventCount = count,
             sessions = sessions,
         )
@@ -57,6 +65,10 @@ class SettingsViewModel(
 
     fun setMagneticDeclination(degrees: Double) {
         viewModelScope.launch { prefs.setMagneticDeclination(degrees) }
+    }
+
+    fun setHeadingOffset(degrees: Double) {
+        viewModelScope.launch { prefs.setHeadingOffset(degrees) }
     }
 
     /** Streams the CSV to [target] off the main thread, then hands the file to [onReady] for sharing. */

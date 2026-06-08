@@ -104,12 +104,10 @@ class CscBleDataSource(
     @Volatile private var wantRunning = false
     private var receiverRegistered = false
 
-    // Per-address reconnect backoff. A failed/abandoned attempt arms a cooldown so the
-    // continuous scan can't hot-loop retries (the classic Android status-133 flap, or a
-    // null connectGatt). Cleared once a sensor is confirmed subscribed. Both maps are
-    // touched from binder threads (GATT callbacks) and the scan callback, hence concurrent.
-    private val nextAttemptAt = ConcurrentHashMap<String, Long>() // address -> elapsedRealtime gate
-    private val failureCount = ConcurrentHashMap<String, Int>()   // address -> consecutive failures
+    // Per-address reconnect backoff (the state machine that throttles status-133 flaps,
+    // null connectGatt, and unconfirmed CCCD writes). Extracted so its rules are unit
+    // tested in ReconnectPolicyTest; it reads the same monotonic clock used everywhere here.
+    private val reconnect = ReconnectPolicy { SystemClock.elapsedRealtime() }
 
     // Merged live state across all connected sensors. Multiple GATT callbacks run on
     // binder threads, so every read-modify-write of this state is guarded by [stateLock]
@@ -167,8 +165,7 @@ class CscBleDataSource(
         stopScan()
         connections.values.forEach { it.gatt?.close() }
         connections.clear()
-        nextAttemptAt.clear()
-        failureCount.clear()
+        reconnect.clear()
         staleJob?.cancel(); staleJob = null
         headingJob?.cancel(); headingJob = null
         pairedJob?.cancel(); pairedJob = null
@@ -185,8 +182,7 @@ class CscBleDataSource(
                     Log.i(TAG, "Bluetooth turned on")
                     if (wantRunning && !scanning) {
                         // Fresh start: a deliberate toggle shouldn't inherit stale backoff.
-                        nextAttemptAt.clear()
-                        failureCount.clear()
+                        reconnect.clear()
                         startScan()
                     }
                 }
@@ -228,8 +224,7 @@ class CscBleDataSource(
         scanning = false
         connections.values.forEach { it.gatt?.close() }
         connections.clear()
-        nextAttemptAt.clear()
-        failureCount.clear()
+        reconnect.clear()
         seen.keys.forEach { addr -> seen[addr]?.let { seen[addr] = it.copy(connected = false) } }
         publishDiscovered()
         updateConnectionState()
@@ -290,8 +285,7 @@ class CscBleDataSource(
     private fun connectIfNeeded(address: String) {
         // Honour the reconnect backoff: while an address is cooling down after a failed
         // attempt, ignore scan results for it so we don't hot-loop into the same failure.
-        val gateAt = nextAttemptAt[address]
-        if (gateAt != null && SystemClock.elapsedRealtime() < gateAt) return
+        if (!reconnect.canAttempt(address)) return
         val device = devices[address] ?: return
         val conn = SensorConnection(address)
         // Claim the slot atomically so a concurrent scan callback + paired-flow
@@ -305,26 +299,11 @@ class CscBleDataSource(
             // drop it and arm a backoff so the next scan result retries with a delay.
             Log.w(TAG, "connectGatt returned null for $address; backing off")
             connections.remove(address, conn)
-            recordFailure(address)
+            val delay = reconnect.recordFailure(address)
+            Log.w(TAG, "connect to $address abandoned; retrying in ${delay}ms")
             return
         }
         conn.gatt = gatt
-    }
-
-    /** Arms an exponential backoff after a failed/abandoned attempt for [address]. */
-    private fun recordFailure(address: String) {
-        val failures = (failureCount[address] ?: 0) + 1
-        failureCount[address] = failures
-        val delay = backoffDelayMs(failures)
-        nextAttemptAt[address] = SystemClock.elapsedRealtime() + delay
-        Log.w(TAG, "connect attempt $failures for $address failed; retrying in ${delay}ms")
-    }
-
-    /** Clears backoff once [address] is confirmed healthy (subscribed), so a later drop
-     *  reconnects promptly instead of inheriting an old penalty. */
-    private fun recordSuccess(address: String) {
-        failureCount.remove(address)
-        nextAttemptAt.remove(address)
     }
 
     private fun disconnect(address: String) {
@@ -442,7 +421,7 @@ class CscBleDataSource(
                         // A drop before we ever subscribed is a flap (e.g. status 133): back
                         // off so the scan doesn't immediately retry into the same failure. A
                         // drop after a healthy subscription gets no penalty — reconnect fast.
-                        if (wasReady) recordSuccess(address) else recordFailure(address)
+                        reconnect.onDisconnect(address, wasSubscribed = wasReady)
                     }
                 }
             }
@@ -475,7 +454,7 @@ class CscBleDataSource(
                 return
             }
             ready = true
-            recordSuccess(address)
+            reconnect.recordSuccess(address)
             markConnected(address, true)
             Log.i(TAG, "subscribed to $address")
         }
@@ -542,19 +521,6 @@ class CscBleDataSource(
         private const val STALE_MS = 2_500L
         // Minimum heading change (degrees) that warrants a live update.
         private const val HEADING_EPSILON_DEG = 1f
-
-        // Reconnect backoff: 500ms, 1s, 2s, 4s, ... doubling per consecutive failure,
-        // capped at 30s. Shift is bounded so the doubling can't overflow.
-        private const val BASE_BACKOFF_MS = 500L
-        private const val MAX_BACKOFF_MS = 30_000L
-        private const val MAX_BACKOFF_SHIFT = 16
-
-        /** Backoff delay for the Nth consecutive failure (1-based). Pure, for unit testing. */
-        fun backoffDelayMs(failures: Int): Long {
-            if (failures <= 0) return 0L
-            val shift = (failures - 1).coerceAtMost(MAX_BACKOFF_SHIFT)
-            return (BASE_BACKOFF_MS shl shift).coerceAtMost(MAX_BACKOFF_MS)
-        }
 
         private val CSC_SERVICE_UUID = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb")
         private val CSC_MEASUREMENT_UUID = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb")

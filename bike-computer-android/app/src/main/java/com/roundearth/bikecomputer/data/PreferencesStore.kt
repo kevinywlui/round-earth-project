@@ -19,9 +19,11 @@ class PreferencesStore(context: Context) {
         private val KEY_CIRCUMFERENCE = doublePreferencesKey("wheel_circumference_m")
         private val KEY_IMPERIAL = booleanPreferencesKey("use_imperial")
         private val KEY_DECLINATION = doublePreferencesKey("magnetic_declination_deg")
+        private val KEY_HEADING_OFFSET = doublePreferencesKey("heading_mounting_offset_deg")
         private val KEY_PAIRED_SENSORS = stringSetPreferencesKey("paired_sensors")
         const val DEFAULT_CIRCUMFERENCE = 2.096  // 700c × 25mm
         const val DEFAULT_DECLINATION = 0.0      // true == magnetic until the user sets it
+        const val DEFAULT_HEADING_OFFSET = 0.0   // phone assumed aligned with travel until calibrated
     }
 
     val wheelCircumferenceMeters: Flow<Double> = store.data.map {
@@ -35,6 +37,11 @@ class PreferencesStore(context: Context) {
     /** Local magnetic declination in degrees (positive east); added to magnetic heading. */
     val magneticDeclinationDeg: Flow<Double> = store.data.map {
         it[KEY_DECLINATION] ?: DEFAULT_DECLINATION
+    }
+
+    /** Mounting offset in degrees; subtracted from the raw azimuth (phone yaw vs. travel). */
+    val headingOffsetDeg: Flow<Double> = store.data.map {
+        it[KEY_HEADING_OFFSET] ?: DEFAULT_HEADING_OFFSET
     }
 
     /** BLE addresses of sensors the user has chosen to connect to. */
@@ -52,6 +59,10 @@ class PreferencesStore(context: Context) {
 
     suspend fun setMagneticDeclination(degrees: Double) {
         store.edit { it[KEY_DECLINATION] = degrees }
+    }
+
+    suspend fun setHeadingOffset(degrees: Double) {
+        store.edit { it[KEY_HEADING_OFFSET] = degrees }
     }
 
     suspend fun setPairedSensors(addresses: Set<String>) {

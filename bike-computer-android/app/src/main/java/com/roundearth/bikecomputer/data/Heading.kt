@@ -27,3 +27,17 @@ fun signedAngleDelta(from: Float, to: Float): Float {
     val d = ((to - from) % 360f + 360f) % 360f
     return if (d > 180f) d - 360f else d
 }
+
+/**
+ * Corrects a raw sensor azimuth for how the phone is mounted on the bike. The
+ * rotation-vector azimuth reflects the phone's own yaw, which is only the bike's
+ * direction of travel if the phone happens to be aligned with it; [offsetDegrees]
+ * is the fixed angle between the two, so corrected = raw − offset, normalized to
+ * [0, 360).
+ *
+ * [Float.NaN] (no heading yet / no sensor) passes through unchanged — a missing
+ * reading must stay "unknown", never collapse to 0° (due north).
+ */
+fun applyMountingOffset(rawDegrees: Float, offsetDegrees: Float): Float =
+    if (rawDegrees.isNaN()) Float.NaN
+    else ((rawDegrees - offsetDegrees) % 360f + 360f) % 360f

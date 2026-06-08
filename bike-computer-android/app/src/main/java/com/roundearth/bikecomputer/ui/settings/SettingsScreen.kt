@@ -33,8 +33,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import android.Manifest
 import android.content.ClipData
 import android.content.Intent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,6 +51,8 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.io.File
 import java.util.Locale
+import com.roundearth.bikecomputer.BikeApplication
+import com.roundearth.bikecomputer.data.DeclinationProvider
 import com.roundearth.bikecomputer.ui.theme.Divider
 import com.roundearth.bikecomputer.ui.theme.Green
 import com.roundearth.bikecomputer.ui.theme.Surface
@@ -81,6 +87,33 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
     }
     var declinationEast by remember(state.magneticDeclinationDeg) {
         mutableStateOf(state.magneticDeclinationDeg >= 0)
+    }
+    var offsetText by remember(state.headingOffsetDeg) {
+        mutableStateOf(String.format(Locale.US, "%.0f", state.headingOffsetDeg))
+    }
+
+    val app = context.applicationContext as BikeApplication
+
+    // Auto-declination: ask for coarse location once, then compute from the last known fix.
+    // Saving updates the pref, which re-seeds the field above via remember(state...).
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(context, "Location permission needed to auto-detect", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val declination = DeclinationProvider(context).currentDeclinationDegrees(System.currentTimeMillis())
+        if (declination == null) {
+            Toast.makeText(context, "No location fix yet — enable location and retry", Toast.LENGTH_LONG).show()
+        } else {
+            viewModel.setMagneticDeclination(declination.toDouble())
+            Toast.makeText(
+                context,
+                String.format(Locale.US, "Declination set to %.1f°%s", kotlin.math.abs(declination), if (declination >= 0) "E" else "W"),
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
     }
 
     Column(
@@ -232,6 +265,69 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = { locationLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                border = BorderStroke(1.dp, Divider),
+            ) { Text("AUTO-DETECT FROM LOCATION", fontSize = 12.sp) }
+
+            Spacer(Modifier.height(28.dp))
+            SectionLabel("MOUNTING OFFSET")
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "Corrects for how the phone sits on the mount: the angle between " +
+                    "the phone and the bike's forward direction. Point the bike due north " +
+                    "and tap CALIBRATE, or enter the angle directly.",
+                color = TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedTextField(
+                value = offsetText,
+                onValueChange = { offsetText = it },
+                label = { Text("Degrees") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                trailingIcon = {
+                    TextButton(onClick = {
+                        offsetText.toDoubleOrNull()
+                            ?.let { ((it % 360.0) + 360.0) % 360.0 }
+                            ?.let { viewModel.setHeadingOffset(it) }
+                    }) { Text("SET", color = Green) }
+                },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = Green,
+                    unfocusedBorderColor = Divider,
+                    focusedLabelColor = Green,
+                    unfocusedLabelColor = TextSecondary,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = {
+                    val raw = app.rawHeadingDegrees
+                    when {
+                        !app.hasHeadingSensor ->
+                            Toast.makeText(context, "No compass sensor on this device", Toast.LENGTH_SHORT).show()
+                        raw.isNaN() ->
+                            Toast.makeText(context, "No heading yet — wait for the compass", Toast.LENGTH_SHORT).show()
+                        else -> {
+                            // Bike is pointing north, so the raw azimuth IS the mounting offset:
+                            // subtracting it makes the corrected heading read 0° (north) here.
+                            viewModel.setHeadingOffset(raw.toDouble())
+                            Toast.makeText(context, "Calibrated", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                border = BorderStroke(1.dp, Divider),
+            ) { Text("CALIBRATE: BIKE POINTING NORTH", fontSize = 12.sp) }
 
             Spacer(Modifier.height(20.dp))
             SectionLabel("RECORDED DATA")

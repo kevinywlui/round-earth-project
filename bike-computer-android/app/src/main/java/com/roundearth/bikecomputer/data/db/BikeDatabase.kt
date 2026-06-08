@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [RevolutionEvent::class], version = 4, exportSchema = false)
+@Database(entities = [RevolutionEvent::class], version = 5, exportSchema = false)
 abstract class BikeDatabase : RoomDatabase() {
     abstract fun revolutionEventDao(): RevolutionEventDao
 
@@ -46,12 +46,42 @@ abstract class BikeDatabase : RoomDatabase() {
             }
         }
 
+        // v5: back-fill deltaRevolutions for rows written before v4 (which left them 0,
+        // so those sessions' totals and distance silently undercounted). Each row's delta
+        // is the cumulative advance over its predecessor in the same session; a backward
+        // jump (sensor reboot) or the first row of a session clamps to 0 — exactly the
+        // live decoder's rule. Idempotent: rows already carrying a correct live delta
+        // recompute to the same value, so this is safe to run over a mixed table.
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    UPDATE revolution_events
+                    SET deltaRevolutions = MAX(0, cumulativeRevolutions - (
+                        SELECT prev.cumulativeRevolutions
+                        FROM revolution_events AS prev
+                        WHERE prev.sessionId = revolution_events.sessionId
+                          AND prev.id < revolution_events.id
+                        ORDER BY prev.id DESC
+                        LIMIT 1
+                    ))
+                    WHERE EXISTS (
+                        SELECT 1 FROM revolution_events AS prev
+                        WHERE prev.sessionId = revolution_events.sessionId
+                          AND prev.id < revolution_events.id
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun get(context: Context): BikeDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(
                 context.applicationContext,
                 BikeDatabase::class.java,
                 "bike.db",
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .build().also { instance = it }
         }
     }
 }
