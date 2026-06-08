@@ -14,6 +14,10 @@ A homemade bike computer in two halves: a DIY **wheel-speed sensor** and the
   compass. See its [`docs/`](bike-computer-android/docs/) for the heading and
   true-north design notes.
 
+For the design as a whole — the dumb-sensor / smart-app split, the lossless data
+model, the three-clock timing model, and the concurrency and BLE-resilience
+choices — see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
 ## End-to-end data flow
 
 ```
