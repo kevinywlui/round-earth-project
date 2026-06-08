@@ -4,7 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -20,7 +20,7 @@ class PreferencesStore(context: Context) {
         private val KEY_IMPERIAL = booleanPreferencesKey("use_imperial")
         private val KEY_DECLINATION = doublePreferencesKey("magnetic_declination_deg")
         private val KEY_HEADING_OFFSET = doublePreferencesKey("heading_mounting_offset_deg")
-        private val KEY_PAIRED_SENSORS = stringSetPreferencesKey("paired_sensors")
+        private val KEY_PAIRED_SENSOR = stringPreferencesKey("paired_sensor")
         const val DEFAULT_CIRCUMFERENCE = 2.096  // 700c × 25mm
         const val DEFAULT_DECLINATION = 0.0      // true == magnetic until the user sets it
         const val DEFAULT_HEADING_OFFSET = 0.0   // phone assumed aligned with travel until calibrated
@@ -31,7 +31,7 @@ class PreferencesStore(context: Context) {
     }
 
     val useImperial: Flow<Boolean> = store.data.map {
-        it[KEY_IMPERIAL] ?: false
+        it[KEY_IMPERIAL] ?: true  // miles by default
     }
 
     /** Local magnetic declination in degrees (positive east); added to magnetic heading. */
@@ -44,9 +44,9 @@ class PreferencesStore(context: Context) {
         it[KEY_HEADING_OFFSET] ?: DEFAULT_HEADING_OFFSET
     }
 
-    /** BLE addresses of sensors the user has chosen to connect to. */
-    val pairedSensors: Flow<Set<String>> = store.data.map {
-        it[KEY_PAIRED_SENSORS] ?: emptySet()
+    /** BLE address of the sensor the user has chosen to connect to (null if none). */
+    val pairedSensor: Flow<String?> = store.data.map {
+        it[KEY_PAIRED_SENSOR]
     }
 
     suspend fun setWheelCircumference(meters: Double) {
@@ -65,7 +65,10 @@ class PreferencesStore(context: Context) {
         store.edit { it[KEY_HEADING_OFFSET] = degrees }
     }
 
-    suspend fun setPairedSensors(addresses: Set<String>) {
-        store.edit { it[KEY_PAIRED_SENSORS] = addresses }
+    /** Choose the sensor to connect to, or pass null to unpair. */
+    suspend fun setPairedSensor(address: String?) {
+        store.edit {
+            if (address == null) it.remove(KEY_PAIRED_SENSOR) else it[KEY_PAIRED_SENSOR] = address
+        }
     }
 }

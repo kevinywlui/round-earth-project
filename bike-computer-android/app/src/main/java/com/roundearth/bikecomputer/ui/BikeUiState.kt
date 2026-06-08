@@ -5,14 +5,13 @@ import java.util.Locale
 
 data class BikeUiState(
     val speed: Double = 0.0,
-    val cadenceRpm: Double = 0.0,
     /** Heading clockwise from magnetic north [0, 360), or NaN when unknown. */
     val bearingDegrees: Float = Float.NaN,
     /** Heading clockwise from true (geographic) north [0, 360), or NaN when unknown. */
     val trueBearingDegrees: Float = Float.NaN,
     val odometer: Double = 0.0,
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
-    val useImperial: Boolean = false,
+    val useImperial: Boolean = true,
 ) {
     val speedLabel: String get() = if (useImperial) "MPH" else "KM/H"
     val distanceLabel: String get() = if (useImperial) "MI" else "KM"

@@ -14,7 +14,6 @@ class BikeViewModel(repository: BikeRepository) : ViewModel() {
     val uiState = combine(repository.bikeData, repository.connectionState) { data, conn ->
         BikeUiState(
             speed = data.speed,
-            cadenceRpm = data.cadenceRpm,
             bearingDegrees = data.bearingDegrees,
             trueBearingDegrees = data.trueBearingDegrees,
             odometer = data.odometer,

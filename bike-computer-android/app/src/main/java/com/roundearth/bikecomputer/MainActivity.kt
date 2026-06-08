@@ -55,7 +55,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    if (app.usesBle) launcher.launch(blePermissions) else app.repository.start()
+                    launcher.launch(blePermissions)
                 }
 
                 NavHost(

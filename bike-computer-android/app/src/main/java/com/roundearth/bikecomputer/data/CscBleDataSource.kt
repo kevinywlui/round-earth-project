@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /** A CSC sensor seen during scanning, surfaced to the picker UI. */
 data class DiscoveredSensor(
@@ -45,16 +46,14 @@ data class DiscoveredSensor(
 )
 
 /**
- * Connects to CSC (Cycling Speed and Cadence) sensors over BLE, subscribes to
- * their measurement notifications, and turns them into both live dashboard
+ * Connects to a single CSC (Cycling Speed and Cadence) sensor over BLE, subscribes
+ * to its wheel-revolution notifications, and turns them into both live dashboard
  * values and raw [WheelRevolutionReading]s for persistence.
  *
- * Scans for the CSC service (0x1816) and surfaces every device via [discovered]
- * for the picker UI. It connects only to sensors the user has **paired** (their
- * addresses come from [pairedSensors]); pairing more than one is supported, so a
- * dedicated speed sensor and a dedicated cadence sensor merge into one stream.
- * Wheel data feeds speed/odometer (using the configured circumference) and the
- * persisted readings; crank data feeds cadence.
+ * Scans for the CSC service (0x1816) and surfaces every device via [discovered] for
+ * the picker UI. It connects only to the one sensor the user has **paired** (its
+ * address comes from [pairedSensor]). Wheel data feeds speed/odometer (using the
+ * configured circumference) and the persisted readings.
  *
  * Callers MUST hold BLUETOOTH_SCAN / BLUETOOTH_CONNECT (API 31+) before [start].
  */
@@ -67,8 +66,8 @@ class CscBleDataSource(
     private val heading: () -> Float = { 0f },
     /** Current magnetic declination in degrees (positive east); read fresh per use. */
     private val declination: () -> Float = { 0f },
-    /** Addresses of sensors the user has chosen to connect to. */
-    private val pairedSensors: Flow<Set<String>> = MutableStateFlow(emptySet()),
+    /** Address of the sensor the user has chosen to connect to (null if none). */
+    private val pairedSensor: Flow<String?> = MutableStateFlow(null),
 ) : BikeDataSource {
 
     private val scope = CoroutineScope(SupervisorJob())
@@ -79,7 +78,7 @@ class CscBleDataSource(
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
 
-    private val _data = MutableStateFlow(RawBikeData(0.0, 0.0, 0f, 0f, 0.0))
+    private val _data = MutableStateFlow(RawBikeData(0.0, 0f, 0f, 0.0))
     override val data: StateFlow<RawBikeData> = _data
 
     // Unlimited buffer so no revolution is ever dropped — the recorded stream
@@ -95,7 +94,7 @@ class CscBleDataSource(
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
 
-    @Volatile private var pairedAddresses: Set<String> = emptySet()
+    @Volatile private var pairedAddress: String? = null
     private var scanning = false
 
     // True between start() and stop(): the caller wants the source live. Kept independent
@@ -104,31 +103,32 @@ class CscBleDataSource(
     @Volatile private var wantRunning = false
     private var receiverRegistered = false
 
-    // Per-address reconnect backoff (the state machine that throttles status-133 flaps,
-    // null connectGatt, and unconfirmed CCCD writes). Extracted so its rules are unit
-    // tested in ReconnectPolicyTest; it reads the same monotonic clock used everywhere here.
+    // Reconnect backoff (the state machine that throttles status-133 flaps, null
+    // connectGatt, and unconfirmed CCCD writes). Extracted so its rules are unit tested
+    // in ReconnectPolicyTest; it reads the same monotonic clock used everywhere here.
     private val reconnect = ReconnectPolicy { SystemClock.elapsedRealtime() }
 
-    // Merged live state across all connected sensors. Multiple GATT callbacks run on
-    // binder threads, so every read-modify-write of this state is guarded by [stateLock]
-    // (a plain volatile `+=` would lose updates under concurrent sensors).
+    // Live state. GATT callbacks run on binder threads, so read-modify-writes of the
+    // odometer go through [stateLock]; the rest are plain volatiles (single writer each).
     private val stateLock = Any()
     @Volatile private var speedKph = 0.0
-    @Volatile private var cadenceRpm = 0.0
     @Volatile private var odometerM = 0.0
     @Volatile private var lastActivityAt = 0L
-    // Distance is tracked per sensor (keyed by address) and summed, so each sensor's
-    // contribution is well-defined; `odometerSeedM` carries distance from a resumed ride.
-    private val odometerByAddress = HashMap<String, Double>() // guarded by stateLock
-    private var odometerSeedM = 0.0                           // guarded by stateLock
+    private var sensorDistanceM = 0.0 // guarded by stateLock; this ride's measured distance
+    private var odometerSeedM = 0.0   // guarded by stateLock; distance carried from a resumed ride
 
     private fun recomputeOdometerLocked() {
-        odometerM = odometerSeedM + odometerByAddress.values.sum()
+        odometerM = odometerSeedM + sensorDistanceM
     }
 
-    private val devices = ConcurrentHashMap<String, BluetoothDevice>()      // address -> last seen device
-    private val seen = ConcurrentHashMap<String, DiscoveredSensor>()        // address -> UI model
-    private val connections = ConcurrentHashMap<String, SensorConnection>() // address -> live connection
+    private val devices = ConcurrentHashMap<String, BluetoothDevice>() // address -> last seen device
+    private val seen = ConcurrentHashMap<String, DiscoveredSensor>()   // address -> UI model
+    // The single live connection (CAS so a concurrent scan callback + paired-flow emission
+    // can't both open a GATT client, and a late drop callback can't evict a newer one).
+    private val connection = AtomicReference<SensorConnection?>(null)
+
+    private fun isConnected(address: String): Boolean =
+        connection.get()?.let { it.address == address && it.ready } == true
 
     override fun start() {
         if (wantRunning) return // idempotent: onForeground() may re-enter while already live
@@ -138,10 +138,12 @@ class CscBleDataSource(
         // start() issued while BT is off still recovers once the user turns it on.
         registerBtStateReceiver()
         pairedJob = scope.launch {
-            pairedSensors.collect { paired ->
-                pairedAddresses = paired
-                connections.keys.filter { it !in paired }.forEach { disconnect(it) }
-                paired.forEach { addr -> if (devices.containsKey(addr)) connectIfNeeded(addr) }
+            pairedSensor.collect { addr ->
+                pairedAddress = addr
+                // Drop a connection to a sensor that is no longer the chosen one.
+                connection.get()?.let { if (it.address != addr) teardown(it) }
+                // Connect the newly chosen sensor if we've already seen it advertising.
+                if (addr != null && devices.containsKey(addr)) connectIfNeeded(addr)
                 publishDiscovered()
                 updateConnectionState()
             }
@@ -163,8 +165,7 @@ class CscBleDataSource(
         wantRunning = false
         unregisterBtStateReceiver()
         stopScan()
-        connections.values.forEach { it.gatt?.close() }
-        connections.clear()
+        connection.getAndSet(null)?.gatt?.close()
         reconnect.clear()
         staleJob?.cancel(); staleJob = null
         headingJob?.cancel(); headingJob = null
@@ -172,7 +173,7 @@ class CscBleDataSource(
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
-    // --- Bluetooth adapter on/off recovery (b) ---
+    // --- Bluetooth adapter on/off recovery ---
 
     private val btStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -216,14 +217,13 @@ class CscBleDataSource(
     }
 
     /**
-     * The adapter went down: drop scanning and every GATT link, but keep [wantRunning] so
+     * The adapter went down: drop scanning and the GATT link, but keep [wantRunning] so
      * the STATE_ON handler revives everything. The scanner instance is invalid once the
      * adapter is off, so we flip [scanning] directly rather than calling into it.
      */
     private fun onAdapterOff() {
         scanning = false
-        connections.values.forEach { it.gatt?.close() }
-        connections.clear()
+        connection.getAndSet(null)?.gatt?.close()
         reconnect.clear()
         seen.keys.forEach { addr -> seen[addr]?.let { seen[addr] = it.copy(connected = false) } }
         publishDiscovered()
@@ -268,11 +268,11 @@ class CscBleDataSource(
                 address = address,
                 name = name,
                 rssi = result.rssi,
-                paired = address in pairedAddresses,
-                connected = connections[address]?.ready == true,
+                paired = address == pairedAddress,
+                connected = isConnected(address),
             )
             publishDiscovered()
-            if (address in pairedAddresses) connectIfNeeded(address)
+            if (address == pairedAddress) connectIfNeeded(address)
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -283,22 +283,22 @@ class CscBleDataSource(
     }
 
     private fun connectIfNeeded(address: String) {
-        // Honour the reconnect backoff: while an address is cooling down after a failed
+        // Honour the reconnect backoff: while the sensor is cooling down after a failed
         // attempt, ignore scan results for it so we don't hot-loop into the same failure.
         if (!reconnect.canAttempt(address)) return
         val device = devices[address] ?: return
         val conn = SensorConnection(address)
-        // Claim the slot atomically so a concurrent scan callback + paired-flow
-        // emission can't both open a GATT client (which would leak one).
-        if (connections.putIfAbsent(address, conn) != null) return
+        // Claim the slot atomically so a concurrent scan callback + paired-flow emission
+        // can't both open a GATT client (which would leak one).
+        if (!connection.compareAndSet(null, conn)) return
         Log.i(TAG, "connecting to $address")
         val gatt = device.connectGatt(context, false, conn)
         if (gatt == null) {
             // connectGatt can return null (BT briefly unavailable, GATT client limit,
-            // stale handle). Don't leave a zombie entry that blocks every reconnect —
-            // drop it and arm a backoff so the next scan result retries with a delay.
+            // stale handle). Don't leave a zombie that blocks every reconnect — drop it
+            // and arm a backoff so the next scan result retries with a delay.
             Log.w(TAG, "connectGatt returned null for $address; backing off")
-            connections.remove(address, conn)
+            connection.compareAndSet(conn, null)
             val delay = reconnect.recordFailure(address)
             Log.w(TAG, "connect to $address abandoned; retrying in ${delay}ms")
             return
@@ -306,9 +306,12 @@ class CscBleDataSource(
         conn.gatt = gatt
     }
 
-    private fun disconnect(address: String) {
-        connections.remove(address)?.gatt?.close()
-        markConnected(address, false)
+    /** Drops [conn] if it is still the live connection (e.g. the user picked another sensor). */
+    private fun teardown(conn: SensorConnection) {
+        if (connection.compareAndSet(conn, null)) {
+            conn.gatt?.close()
+            markConnected(conn.address, false)
+        }
     }
 
     private fun markConnected(address: String, connected: Boolean) {
@@ -319,13 +322,13 @@ class CscBleDataSource(
 
     private fun publishDiscovered() {
         _discovered.value = seen.values
-            .map { it.copy(paired = it.address in pairedAddresses) }
+            .map { it.copy(paired = it.address == pairedAddress) }
             .sortedWith(compareByDescending<DiscoveredSensor> { it.connected }.thenByDescending { it.rssi })
     }
 
     private fun updateConnectionState() {
         _connectionState.value = when {
-            connections.values.any { it.ready } -> ConnectionState.CONNECTED
+            connection.get()?.ready == true -> ConnectionState.CONNECTED
             scanning -> ConnectionState.SCANNING
             else -> ConnectionState.DISCONNECTED
         }
@@ -344,14 +347,13 @@ class CscBleDataSource(
         val t = trueFromMagnetic(h, declination())
         _data.value = RawBikeData(
             speedKph = speedKph,
-            cadenceRpm = cadenceRpm,
             bearingDegrees = h,
             trueBearingDegrees = t,
             odometerKm = odometerM / 1000.0,
         )
     }
 
-    /** Zeroes speed/cadence when no revolutions arrive (the bike has stopped). */
+    /** Zeroes speed when no revolutions arrive (the bike has stopped). */
     private fun startStaleWatcher() {
         staleJob?.cancel()
         staleJob = scope.launch {
@@ -359,13 +361,12 @@ class CscBleDataSource(
                 delay(1_000)
                 val zeroed = synchronized(stateLock) {
                     val idle = SystemClock.elapsedRealtime() - lastActivityAt
-                    if (lastActivityAt > 0 && idle > STALE_MS && (speedKph != 0.0 || cadenceRpm != 0.0)) {
+                    if (lastActivityAt > 0 && idle > STALE_MS && speedKph != 0.0) {
                         speedKph = 0.0
-                        cadenceRpm = 0.0
                         true
                     } else false
                 }
-                if (zeroed) _data.update { it.copy(speedKph = 0.0, cadenceRpm = 0.0) }
+                if (zeroed) _data.update { it.copy(speedKph = 0.0) }
             }
         }
     }
@@ -394,8 +395,8 @@ class CscBleDataSource(
         }
     }
 
-    /** One BLE connection to a single CSC sensor, with its own decode state. */
-    private inner class SensorConnection(private val address: String) : BluetoothGattCallback() {
+    /** The BLE connection to the chosen CSC sensor, with its own decode state. */
+    private inner class SensorConnection(val address: String) : BluetoothGattCallback() {
 
         @Volatile var gatt: BluetoothGatt? = null
         @Volatile var ready = false
@@ -412,10 +413,10 @@ class CscBleDataSource(
                     val wasReady = ready
                     g.close()
                     ready = false
-                    // Only evict the map entry if it is still THIS connection: after a
-                    // fast flap a newer SensorConnection may already own the slot, and a
-                    // late callback for the old GATT must not remove the live one.
-                    if (connections.remove(address, this)) {
+                    // Only clear the slot if it is still THIS connection: after a fast flap
+                    // a newer SensorConnection may already own it, and a late callback for
+                    // the old GATT must not evict the live one.
+                    if (connection.compareAndSet(this, null)) {
                         // Continuous scanning will rediscover and reconnect if still paired.
                         markConnected(address, false)
                         // A drop before we ever subscribed is a flap (e.g. status 133): back
@@ -496,18 +497,13 @@ class CscBleDataSource(
                 // Distance comes from the (reliable) cumulative count, so count it even
                 // when speed isn't derivable (event-time delta 0, or a >64 s wrap).
                 if (result.distanceMeters > 0.0) {
-                    odometerByAddress[address] = (odometerByAddress[address] ?: 0.0) + result.distanceMeters
+                    sensorDistanceM += result.distanceMeters
                     recomputeOdometerLocked()
                     lastActivityAt = SystemClock.elapsedRealtime()
                     changed = true
                 }
                 result.speedKph?.let {
                     speedKph = it
-                    lastActivityAt = SystemClock.elapsedRealtime()
-                    changed = true
-                }
-                result.cadenceRpm?.let {
-                    cadenceRpm = it
                     lastActivityAt = SystemClock.elapsedRealtime()
                     changed = true
                 }

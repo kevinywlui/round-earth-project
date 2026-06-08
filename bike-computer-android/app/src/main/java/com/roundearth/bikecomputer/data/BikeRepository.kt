@@ -11,7 +11,6 @@ import kotlinx.coroutines.launch
 
 data class BikeData(
     val speed: Double,
-    val cadenceRpm: Double,
     val bearingDegrees: Float,
     val trueBearingDegrees: Float,
     val odometer: Double,
@@ -37,7 +36,6 @@ class BikeRepository(
     val bikeData: Flow<BikeData> = combine(source.data, prefs.useImperial) { raw, imperial ->
         BikeData(
             speed = if (imperial) raw.speedKph * 0.621371 else raw.speedKph,
-            cadenceRpm = raw.cadenceRpm,
             bearingDegrees = raw.bearingDegrees,
             trueBearingDegrees = raw.trueBearingDegrees,
             odometer = if (imperial) raw.odometerKm * 0.621371 else raw.odometerKm,

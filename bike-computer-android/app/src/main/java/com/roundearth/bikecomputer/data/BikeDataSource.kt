@@ -21,4 +21,4 @@ interface BikeDataSource {
     fun seedOdometer(meters: Double) {}
 }
 
-enum class ConnectionState { DISCONNECTED, SCANNING, CONNECTED, SIMULATED }
+enum class ConnectionState { DISCONNECTED, SCANNING, CONNECTED }

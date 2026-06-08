@@ -16,7 +16,7 @@ import java.io.File
 
 data class SettingsUiState(
     val wheelCircumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE,
-    val useImperial: Boolean = false,
+    val useImperial: Boolean = true,
     val magneticDeclinationDeg: Double = PreferencesStore.DEFAULT_DECLINATION,
     val headingOffsetDeg: Double = PreferencesStore.DEFAULT_HEADING_OFFSET,
     val recordedEventCount: Int = 0,

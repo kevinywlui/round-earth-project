@@ -226,28 +226,11 @@ private fun SpeedDisplay(state: BikeUiState) {
 
 @Composable
 private fun SecondaryMetricsRow(state: BikeUiState) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(IntrinsicSize.Min),
-    ) {
-        MetricCell(
-            value = "%.0f".format(state.cadenceRpm),
-            label = "RPM",
-            modifier = Modifier.weight(1f),
-        )
-        Box(
-            modifier = Modifier
-                .width(1.dp)
-                .fillMaxHeight()
-                .background(Divider),
-        )
-        MetricCell(
-            value = "%.1f".format(state.odometer),
-            label = state.distanceLabel,
-            modifier = Modifier.weight(1f),
-        )
-    }
+    MetricCell(
+        value = "%.1f".format(state.odometer),
+        label = state.distanceLabel,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 @Composable
@@ -266,7 +249,6 @@ private fun StatusBar(state: ConnectionState) {
     val (color, label) = when (state) {
         ConnectionState.CONNECTED -> Color(0xFF4CAF50) to "● CONNECTED"
         ConnectionState.SCANNING -> Color(0xFFFFC107) to "◌ SCANNING"
-        ConnectionState.SIMULATED -> Color(0xFF2196F3) to "◉ SIMULATED"
         ConnectionState.DISCONNECTED -> TextSecondary to "○ DISCONNECTED"
     }
     Text(

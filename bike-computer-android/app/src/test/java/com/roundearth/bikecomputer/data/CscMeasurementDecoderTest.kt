@@ -7,10 +7,10 @@ import org.junit.Test
 
 /**
  * Unit tests for [CscMeasurementDecoder], exercising the CSC Measurement byte
- * layout and the speed/cadence math without any BLE hardware.
+ * layout and the wheel-speed math without any BLE hardware.
  *
  * Packet layout (CSC Profile §4.4), all little-endian:
- *   flags(1) [ wheelRevs(u32) wheelTime(u16) ] [ crankRevs(u16) crankTime(u16) ]
+ *   flags(1) wheelRevs(u32) wheelTime(u16)
  * Event times are in 1/1024 s units.
  */
 class CscMeasurementDecoderTest {
@@ -25,28 +25,6 @@ class CscMeasurementDecoderTest {
         ((revs shr 24) and 0xFF).toByte(),
         (time and 0xFF).toByte(),
         ((time shr 8) and 0xFF).toByte(),
-    )
-
-    private fun crankPacket(revs: Int, time: Int): ByteArray = byteArrayOf(
-        0x02,
-        (revs and 0xFF).toByte(),
-        ((revs shr 8) and 0xFF).toByte(),
-        (time and 0xFF).toByte(),
-        ((time shr 8) and 0xFF).toByte(),
-    )
-
-    private fun comboPacket(wRevs: Long, wTime: Int, cRevs: Int, cTime: Int): ByteArray = byteArrayOf(
-        0x03,
-        (wRevs and 0xFF).toByte(),
-        ((wRevs shr 8) and 0xFF).toByte(),
-        ((wRevs shr 16) and 0xFF).toByte(),
-        ((wRevs shr 24) and 0xFF).toByte(),
-        (wTime and 0xFF).toByte(),
-        ((wTime shr 8) and 0xFF).toByte(),
-        (cRevs and 0xFF).toByte(),
-        ((cRevs shr 8) and 0xFF).toByte(),
-        (cTime and 0xFF).toByte(),
-        ((cTime shr 8) and 0xFF).toByte(),
     )
 
     @Test
@@ -160,46 +138,10 @@ class CscMeasurementDecoderTest {
     }
 
     @Test
-    fun twoCrankPacketsGiveCorrectCadence() {
-        val decoder = CscMeasurementDecoder()
-        decoder.decode(crankPacket(revs = 100, time = 1000), circumference)
-        // +2 revs over 1024 ticks → 1.0 s → 120 rpm
-        val result = decoder.decode(crankPacket(revs = 102, time = 2024), circumference)
-
-        assertEquals(120.0, result.cadenceRpm!!, 1e-6)
-        assertNull("crank-only packet carries no speed", result.speedKph)
-    }
-
-    @Test
-    fun crankRevolutionCountWrapIsHandled() {
-        val decoder = CscMeasurementDecoder()
-        decoder.decode(crankPacket(revs = 65535, time = 1000), circumference)
-        // 16-bit count wraps: 1 - 65535 ≡ 2 revs (mod 65536), over 1024 ticks → 120 rpm
-        val result = decoder.decode(crankPacket(revs = 1, time = 2024), circumference)
-
-        assertEquals(120.0, result.cadenceRpm!!, 1e-6)
-    }
-
-    @Test
-    fun comboPacketYieldsBothSpeedAndCadence() {
-        val decoder = CscMeasurementDecoder()
-        decoder.decode(comboPacket(wRevs = 1000, wTime = 5000, cRevs = 100, cTime = 1000), circumference)
-        val result = decoder.decode(
-            comboPacket(wRevs = 1003, wTime = 5800, cRevs = 102, cTime = 2024),
-            circumference,
-        )
-
-        assertEquals(6.0, result.distanceMeters, 1e-9)
-        assertEquals(6.0 / (800.0 / 1024.0) * 3.6, result.speedKph!!, 1e-6)
-        assertEquals(120.0, result.cadenceRpm!!, 1e-6)
-    }
-
-    @Test
     fun emptyAndTruncatedPacketsAreSafe() {
         val decoder = CscMeasurementDecoder()
         val empty = decoder.decode(ByteArray(0), circumference)
         assertNull(empty.speedKph)
-        assertNull(empty.cadenceRpm)
 
         // wheel flag set but the revolution/time bytes are missing
         val truncated = decoder.decode(byteArrayOf(0x01, 0x00, 0x00), circumference)

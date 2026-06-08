@@ -7,9 +7,9 @@ import androidx.room.PrimaryKey
 /**
  * One raw wheel-revolution event, exactly as reported by the CSC sensor.
  *
- * Stored losslessly so rides can be re-analyzed later: speed, distance, and
- * cadence are all derivable from the cumulative count, the sensor event time,
- * and the configured wheel circumference. Nothing is pre-aggregated.
+ * Stored losslessly so rides can be re-analyzed later: speed and distance are
+ * derivable from the cumulative count, the sensor event time, and the configured
+ * wheel circumference. Nothing is pre-aggregated.
  */
 @Entity(tableName = "revolution_events", indices = [Index("sessionId")])
 data class RevolutionEvent(
