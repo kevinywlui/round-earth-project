@@ -67,8 +67,10 @@ class BikeRepository(
                             deltaRevolutions = reading.deltaRevolutions,
                             sensorEventTime1024 = reading.sensorEventTime1024,
                             wheelCircumferenceM = reading.wheelCircumferenceM,
-                            headingDegrees = reading.headingDegrees,
-                            trueHeadingDegrees = reading.trueHeadingDegrees,
+                            // Map the in-memory NaN="unknown" heading to a NULL column: a bound
+                            // NaN becomes NULL in SQLite and would fail the NOT NULL constraint.
+                            headingDegrees = reading.headingDegrees.takeUnless { it.isNaN() },
+                            trueHeadingDegrees = reading.trueHeadingDegrees.takeUnless { it.isNaN() },
                         )
                     )
                 }
@@ -114,8 +116,9 @@ class BikeRepository(
                 out.append(e.deltaRevolutions.toString()).append(',')
                 out.append(e.sensorEventTime1024.toString()).append(',')
                 out.append(e.wheelCircumferenceM.toString()).append(',')
-                out.append(e.headingDegrees.toString()).append(',')
-                out.append(e.trueHeadingDegrees.toString()).append('\n')
+                // Unknown heading is an empty CSV field (NULL), not "NaN" or "0".
+                out.append(e.headingDegrees?.toString() ?: "").append(',')
+                out.append(e.trueHeadingDegrees?.toString() ?: "").append('\n')
                 afterId = e.id
             }
         }

@@ -31,15 +31,17 @@ data class RevolutionEvent(
     /** Wheel circumference in meters in effect when this event was recorded. */
     val wheelCircumferenceM: Double,
     /**
-     * Compass heading clockwise from magnetic north [0, 360) at this event, or
-     * [Float.NaN] if unknown. NaN means "unknown" and must never be coerced to 0f
-     * (= due north) — no default, so every writer is forced to supply a value.
+     * Compass heading clockwise from magnetic north [0, 360) at this event, or NULL when
+     * unknown (no compass sensor, or no reading yet). Persisted NULLABLE, never as Float.NaN:
+     * SQLite turns a bound NaN into NULL, so storing it in a NOT NULL column throws a
+     * constraint error at insert. NULL is the persisted form of the in-memory NaN="unknown"
+     * heading and must never be read back as 0f (due north). No default, so the writer is
+     * forced to map NaN -> null explicitly.
      */
-    val headingDegrees: Float,
+    val headingDegrees: Float?,
     /**
-     * Heading clockwise from true (geographic) north [0, 360) = magnetic + declination,
-     * or [Float.NaN] if unknown. Same NaN="unknown, never 0f/north" invariant as
-     * [headingDegrees]; no default for the same reason.
+     * Heading clockwise from true (geographic) north [0, 360) = magnetic + declination, or
+     * NULL when unknown. Same nullable-means-unknown rule as [headingDegrees].
      */
-    val trueHeadingDegrees: Float,
+    val trueHeadingDegrees: Float?,
 )
