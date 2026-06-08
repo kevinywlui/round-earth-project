@@ -43,6 +43,8 @@ data class DiscoveredSensor(
     val rssi: Int,
     val paired: Boolean,
     val connected: Boolean,
+    /** Firmware revision read from the Device Information Service once connected, or null. */
+    val firmwareRevision: String? = null,
 )
 
 /**
@@ -242,7 +244,7 @@ class CscBleDataSource(
         scanning = false
         connection.getAndSet(null)?.gatt?.close()
         reconnect.clear()
-        seen.keys.forEach { addr -> seen[addr]?.let { seen[addr] = it.copy(connected = false) } }
+        seen.keys.forEach { addr -> seen.computeIfPresent(addr) { _, s -> s.copy(connected = false) } }
         publishDiscovered()
         updateConnectionState()
     }
@@ -281,16 +283,14 @@ class CscBleDataSource(
             devices[address] = device
             // scanRecord.deviceName comes from the advertisement (no CONNECT needed).
             val name = result.scanRecord?.deviceName ?: address
-            seen[address] = DiscoveredSensor(
-                address = address,
-                name = name,
-                rssi = result.rssi,
-                // Placeholder: publishDiscovered() is the single authority for `paired`
-                // (it recomputes it on every emission, since pairedAddress can change
-                // without a rescan). The value stored here never reaches the UI.
-                paired = false,
-                connected = isConnected(address),
-            )
+            // compute() folds the read-of-prior-entry into the atomic mutation, so a
+            // concurrent setFirmwareRevision (on the GATT binder thread) can't be lost:
+            // re-seeing the advertisement preserves a firmware revision already read this
+            // session instead of clobbering it back to null.
+            val connected = isConnected(address)
+            seen.compute(address) { _, prev ->
+                mergeScanResult(prev, address, name, result.rssi, connected)
+            }
             publishDiscovered()
             if (address == pairedAddress) connectIfNeeded(address)
         }
@@ -341,9 +341,24 @@ class CscBleDataSource(
     }
 
     private fun markConnected(address: String, connected: Boolean) {
-        seen[address]?.let { seen[address] = it.copy(connected = connected) }
+        seen.computeIfPresent(address) { _, s -> s.copy(connected = connected) }
         publishDiscovered()
         updateConnectionState()
+    }
+
+    /** Records the firmware revision read from a sensor's Device Information Service. */
+    private fun setFirmwareRevision(address: String, bytes: ByteArray?) {
+        val rev = parseFirmwareRevision(bytes) ?: return
+        // computeIfPresent keeps this read-modify-write atomic per key. The scan callback
+        // rebuilds seen[address] via compute() (also atomic) and carries the prior firmware
+        // revision forward, so neither writer can drop the value the other just set.
+        // seen[] entries are never removed today, so the key is effectively always
+        // present; computeIfPresent is defensive — it would simply no-op if one ever were.
+        // (A failed re-read after a reflash leaves the previously read value in place, on
+        // purpose — see parseFirmwareRevision returning null and this returning early.)
+        seen.computeIfPresent(address) { _, s -> s.copy(firmwareRevision = rev) }
+        publishDiscovered()
+        Log.i(TAG, "firmware revision for $address: $rev")
     }
 
     private fun publishDiscovered() {
@@ -491,6 +506,47 @@ class CscBleDataSource(
             reconnect.recordSuccess(address)
             markConnected(address, true)
             Log.i(TAG, "subscribed to $address")
+
+            // Best-effort: now that we're subscribed (the priority), read the firmware
+            // revision from the optional Device Information Service. Old firmware without
+            // a DIS simply has no such characteristic, and we skip it silently.
+            val fwChar = g.getService(DIS_SERVICE_UUID)?.getCharacteristic(FIRMWARE_REVISION_UUID)
+            if (fwChar != null && !g.readCharacteristic(fwChar)) {
+                Log.w(TAG, "could not start firmware-revision read for $address")
+            }
+        }
+
+        // Unlike onConnectionStateChange, the read path is intentionally NOT ownership-gated
+        // (no compareAndSet(this) check): setFirmwareRevision is keyed on address and uses
+        // computeIfPresent, so a late/stale read after a fast flap only ever updates the
+        // correct row by address — it can never corrupt another connection's entry.
+        @Deprecated("Deprecated in API 33; the ByteArray overload is used there")
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicRead(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
+            if (c.uuid != FIRMWARE_REVISION_UUID) return
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                setFirmwareRevision(address, c.value)
+            } else {
+                // A read that started then failed (vs. old firmware with no DIS, which
+                // never starts a read) leaves firmwareRevision null; log so the two cases
+                // are distinguishable. It refills on the next reconnect, so no retry.
+                Log.w(TAG, "firmware-revision read for $address failed: status=$status")
+            }
+        }
+
+        // API 33+ overload.
+        override fun onCharacteristicRead(
+            g: BluetoothGatt,
+            c: BluetoothGattCharacteristic,
+            value: ByteArray,
+            status: Int,
+        ) {
+            if (c.uuid != FIRMWARE_REVISION_UUID) return
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                setFirmwareRevision(address, value)
+            } else {
+                Log.w(TAG, "firmware-revision read for $address failed: status=$status")
+            }
         }
 
         @Deprecated("Deprecated in API 33; the ByteArray overload is used there")
@@ -558,5 +614,48 @@ class CscBleDataSource(
         private val CSC_SERVICE_UUID = UUID.fromString("00001816-0000-1000-8000-00805f9b34fb")
         private val CSC_MEASUREMENT_UUID = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        // Device Information Service (read once after connecting, optional on the sensor).
+        private val DIS_SERVICE_UUID = UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
+        private val FIRMWARE_REVISION_UUID = UUID.fromString("00002a26-0000-1000-8000-00805f9b34fb")
+
+        /**
+         * Decodes a Device Information Service Firmware Revision value into a display
+         * string, or null if there is nothing usable to show.
+         *
+         * DIS strings are UTF-8 and may be NUL-padded; we trim padding and whitespace.
+         * Our firmware uses strlen() so it never NUL-pads, but this stays defensive
+         * against other DIS implementations. The '\u0000' is an explicit escape so it
+         * stays visible in diffs/editors rather than being a raw control byte.
+         */
+        internal fun parseFirmwareRevision(bytes: ByteArray?): String? {
+            if (bytes == null || bytes.isEmpty()) return null
+            val rev = String(bytes, Charsets.UTF_8).trim('\u0000', ' ', '\t', '\n', '\r')
+            return rev.ifEmpty { null }
+        }
+
+        /**
+         * Builds the [DiscoveredSensor] entry for a fresh scan result, carrying the prior
+         * entry's [DiscoveredSensor.firmwareRevision] forward. Run inside seen.compute() so
+         * the read-of-prior + rebuild is atomic per key: a concurrent firmware read (which
+         * uses computeIfPresent on the same key) can never be clobbered back to null.
+         *
+         * `paired` is always a placeholder here — publishDiscovered() is the single authority
+         * and recomputes it on every emission.
+         */
+        internal fun mergeScanResult(
+            prev: DiscoveredSensor?,
+            address: String,
+            name: String,
+            rssi: Int,
+            connected: Boolean,
+        ): DiscoveredSensor = DiscoveredSensor(
+            address = address,
+            name = name,
+            rssi = rssi,
+            paired = false,
+            connected = connected,
+            firmwareRevision = prev?.firmwareRevision,
+        )
     }
 }

@@ -38,6 +38,13 @@ speeds) keeps rides re-analyzable later.
 | Measurement characteristic | `0x2A5B`, notify |
 | Packet | 7 bytes: flags `0x01`, uint32 LE cumulative wheel revs, uint16 LE event time (1/1024 s, wraps at 64 s) |
 
+The firmware also exposes a standard **Device Information Service** (`0x180A`):
+Manufacturer `0x2A29`, Model `0x2A24`, and Firmware Revision `0x2A26` (the
+`FW_VERSION` plus the build date). After subscribing, the app reads only the
+firmware revision, best-effort, and surfaces it under the sensor in the picker;
+firmware without a DIS is skipped silently. No Battery Service is provided — the
+sensor runs off a USB power bank whose charge the ESP32 cannot measure.
+
 ## Out of scope
 
 `sunsight/` is an unrelated web utility (it computes *solar* declination, which

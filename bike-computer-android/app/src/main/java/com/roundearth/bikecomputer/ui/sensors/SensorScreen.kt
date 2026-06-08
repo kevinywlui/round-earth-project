@@ -99,6 +99,9 @@ private fun SensorRow(sensor: DiscoveredSensor, onClick: () -> Unit) {
                 color = TextSecondary,
                 fontSize = 11.sp,
             )
+            sensor.firmwareRevision?.let { fw ->
+                Text("fw $fw", color = TextSecondary, fontSize = 11.sp)
+            }
         }
         StatusChip(sensor)
     }

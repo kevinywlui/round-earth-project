@@ -55,6 +55,17 @@ Implements the [Cycling Speed and Cadence Profile 1.0.1](https://www.bluetooth.c
 
 The measurement packet is 7 bytes: a flags byte (`0x01`, wheel revolution data present), a 32-bit little-endian cumulative wheel revolution count, and a 16-bit little-endian "last wheel event time" in units of 1/1024 s.
 
+A standard **Device Information Service** (`0x180A`) is also exposed, with three read-only string characteristics. The app reads only the firmware revision, best-effort, after it has subscribed to the measurement notifications; firmware that predates this service is skipped silently.
+
+| | |
+|---|---|
+| **Service UUID** | `0x180A` — Device Information |
+| **Manufacturer Name** | `0x2A29` — `round-earth-project` |
+| **Model Number** | `0x2A24` — `Bike Speed (XIAO ESP32-C6)` |
+| **Firmware Revision** | `0x2A26` — `FW_VERSION` plus the compile-time build date, e.g. `1.0 (build Jun  7 2026)` |
+
+No **Battery Service** (`0x180F`) is provided on purpose: the sensor runs off a USB power bank whose charge the ESP32 cannot measure.
+
 ## Configuration
 
 All configuration is at the top of `speed/speed.ino`:
@@ -62,6 +73,7 @@ All configuration is at the top of `speed/speed.ino`:
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `DEVICE_NAME` | `"Bike Speed"` | BLE name prefix; the last two bytes of the MAC are appended at boot (e.g. `Bike Speed 3F9A`) so multiple units are distinguishable |
+| `FW_VERSION` | `"1.0"` | Firmware version string reported (with the build date) over the Device Information Service `0x2A26` |
 | `SENSOR_PIN` | `D0` | GPIO pin connected to the hall effect sensor |
 | `MIN_MS` | `60` | Minimum milliseconds between triggers (debounce; ~125 km/h ceiling on a 2.1 m wheel) |
 | `WDT_TIMEOUT_S` | `5` | Task-watchdog timeout; reboots if `loop()` stalls (e.g. a wedged BLE stack) |

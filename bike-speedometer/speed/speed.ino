@@ -7,6 +7,7 @@
 
 // --- Configuration ---
 #define DEVICE_NAME  "Bike Speed"  // a per-device suffix from the MAC is appended at boot
+#define FW_VERSION   "1.0"         // reported over the BLE Device Information Service (0x180A)
 #define SENSOR_PIN   D0    // hall effect sensor OUT pin (XIAO ESP32-C6)
 #define MIN_MS       60    // minimum ms between triggers (~16.6 rev/s; ~125 km/h on a 2.1 m wheel)
 #define WDT_TIMEOUT_S      5      // reboot if loop() stalls this long (e.g. a wedged BLE stack)
@@ -186,6 +187,28 @@ void setup() {
   featureChar->setValue((uint8_t *)&feature, 2);
 
   service->start();
+
+  // Device Information Service (0x180A): static strings the app reads once after
+  // connecting, so it can show which firmware is flashed and the hardware — no notify
+  // and no advertising needed. The firmware revision carries the build date too, so the
+  // app surfaces exactly what's on the device without a serial console.
+  // (setValue copies the bytes into the characteristic, so these need not outlive
+  // setup(); featureChar above relies on the same copy with a plain stack local.
+  // static here is purely to keep the larger string literals off the stack.)
+  static const char *MANUFACTURER = "round-earth-project";
+  static const char *MODEL        = "Bike Speed (XIAO ESP32-C6)";
+  static const char *FW_REVISION  = FW_VERSION " (build " __DATE__ ")";
+  // These three read-only characteristics need ~7 handles, well under createService's
+  // default 15-handle budget. Pass an explicit count here if a 4th+ is ever added,
+  // otherwise registration can silently fail at runtime (it still compiles in CI).
+  BLEService *infoService = server->createService(BLEUUID((uint16_t)0x180A));
+  infoService->createCharacteristic(BLEUUID((uint16_t)0x2A29), BLECharacteristic::PROPERTY_READ)
+    ->setValue((uint8_t *)MANUFACTURER, strlen(MANUFACTURER));  // Manufacturer Name
+  infoService->createCharacteristic(BLEUUID((uint16_t)0x2A24), BLECharacteristic::PROPERTY_READ)
+    ->setValue((uint8_t *)MODEL, strlen(MODEL));                // Model Number
+  infoService->createCharacteristic(BLEUUID((uint16_t)0x2A26), BLECharacteristic::PROPERTY_READ)
+    ->setValue((uint8_t *)FW_REVISION, strlen(FW_REVISION));    // Firmware Revision
+  infoService->start();
 
   // Advertise using the 16-bit CSC service UUID so cycling apps can discover it
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
