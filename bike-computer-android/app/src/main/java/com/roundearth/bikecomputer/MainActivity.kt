@@ -64,7 +64,11 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize().safeDrawingPadding(),
                 ) {
                     composable("dashboard") {
-                        DashboardScreen(viewModel = bikeVm, onSettingsClick = { nav.navigate("settings") })
+                        DashboardScreen(
+                            viewModel = bikeVm,
+                            onSettingsClick = { nav.navigate("settings") },
+                            onStatusClick = { nav.navigate("sensors") },
+                        )
                     }
                     composable("settings") {
                         SettingsScreen(

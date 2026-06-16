@@ -4,6 +4,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,7 +52,11 @@ import com.roundearth.bikecomputer.ui.theme.TextPrimary
 import com.roundearth.bikecomputer.ui.theme.TextSecondary
 
 @Composable
-fun DashboardScreen(viewModel: BikeViewModel, onSettingsClick: () -> Unit) {
+fun DashboardScreen(
+    viewModel: BikeViewModel,
+    onSettingsClick: () -> Unit,
+    onStatusClick: () -> Unit,
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
     val view = LocalView.current
@@ -78,7 +83,7 @@ fun DashboardScreen(viewModel: BikeViewModel, onSettingsClick: () -> Unit) {
         Spacer(Modifier.height(16.dp))
         SecondaryMetricsRow(state)
         Spacer(Modifier.weight(1f))
-        StatusBar(state.connectionState)
+        StatusBar(state.connectionState, onClick = onStatusClick)
     }
 }
 
@@ -245,18 +250,24 @@ private fun MetricCell(value: String, label: String, modifier: Modifier = Modifi
 }
 
 @Composable
-private fun StatusBar(state: ConnectionState) {
+private fun StatusBar(state: ConnectionState, onClick: () -> Unit) {
     val (color, label) = when (state) {
         ConnectionState.CONNECTED -> Color(0xFF4CAF50) to "● CONNECTED"
         ConnectionState.SCANNING -> Color(0xFFFFC107) to "◌ SCANNING"
         ConnectionState.DISCONNECTED -> TextSecondary to "○ DISCONNECTED"
     }
+    // Tapping the status opens the sensors page so the link can be inspected/repaired
+    // (e.g. when a stale paired address leaves it stuck SCANNING). The trailing chevron
+    // hints that it navigates. The whole full-width strip is the tap target.
     Text(
-        text = label,
+        text = "$label  ›",
         color = color,
         fontSize = 11.sp,
         letterSpacing = 1.sp,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
         textAlign = TextAlign.Center,
     )
 }
