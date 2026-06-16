@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.OutputStream
 
 data class SettingsUiState(
     val wheelCircumferenceM: Double = PreferencesStore.DEFAULT_CIRCUMFERENCE,
@@ -108,6 +109,25 @@ class SettingsViewModel(
                 }
             }
             result.fold(onSuccess = { onReady(target) }, onFailure = onError)
+        }
+    }
+
+    /**
+     * Streams the CSV off the main thread into a caller-opened [OutputStream] — e.g. a Storage
+     * Access Framework document the user picked, for a "save/download" as opposed to the share
+     * path's private cache file. [open] is invoked on the IO dispatcher (so opening the
+     * destination doesn't block the UI) and the stream is always closed. [onError] surfaces a
+     * failure so the UI reports it instead of claiming a successful save.
+     */
+    fun saveCsv(open: () -> OutputStream?, onDone: () -> Unit, onError: (Throwable) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val out = open() ?: error("Could not open the destination file")
+                    out.bufferedWriter().use { writer -> repository.exportCsvTo(writer) }
+                }
+            }
+            result.fold(onSuccess = { onDone() }, onFailure = onError)
         }
     }
 

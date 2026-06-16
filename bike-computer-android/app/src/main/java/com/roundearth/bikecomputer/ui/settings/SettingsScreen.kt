@@ -121,6 +121,19 @@ fun SettingsScreen(
         }
     }
 
+    // "Save/download": let the user pick a destination via the Storage Access Framework
+    // (Downloads, Drive, …) — no storage permission needed — then stream the CSV into it.
+    val saveCsvLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult // user dismissed the picker
+        viewModel.saveCsv(
+            open = { context.contentResolver.openOutputStream(uri) },
+            onDone = { Toast.makeText(context, "Saved bike-data.csv", Toast.LENGTH_SHORT).show() },
+            onError = { Toast.makeText(context, "Save failed", Toast.LENGTH_SHORT).show() },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -387,15 +400,23 @@ fun SettingsScreen(
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
                     border = BorderStroke(1.dp, Divider),
-                ) { Text("EXPORT CSV", fontSize = 12.sp) }
+                ) { Text("SHARE CSV", fontSize = 12.sp) }
 
                 OutlinedButton(
-                    onClick = { viewModel.clearHistory() },
+                    onClick = { saveCsvLauncher.launch("bike-data.csv") },
                     modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF44336)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
                     border = BorderStroke(1.dp, Divider),
-                ) { Text("CLEAR", fontSize = 12.sp) }
+                ) { Text("SAVE CSV", fontSize = 12.sp) }
             }
+
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = { viewModel.clearHistory() },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF44336)),
+                border = BorderStroke(1.dp, Divider),
+            ) { Text("CLEAR HISTORY", fontSize = 12.sp) }
             Spacer(Modifier.height(8.dp))
         }
     }
