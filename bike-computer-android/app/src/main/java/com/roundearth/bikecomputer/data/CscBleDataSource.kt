@@ -9,6 +9,7 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
@@ -20,8 +21,9 @@ import android.content.IntentFilter
 import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
-import android.util.Log
 import androidx.annotation.VisibleForTesting
+import com.roundearth.bikecomputer.data.diagnostics.Diag
+import com.roundearth.bikecomputer.data.diagnostics.LogBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -182,7 +184,7 @@ class CscBleDataSource(
         val adapter = adapter
         if (adapter == null || !adapter.isEnabled) {
             // Not fatal: the BT-state receiver starts scanning once the adapter turns on.
-            Log.w(TAG, "Bluetooth disabled; waiting for it to turn on")
+            Diag.w(TAG, "Bluetooth disabled; waiting for it to turn on")
             _connectionState.value = ConnectionState.DISCONNECTED
             return
         }
@@ -208,7 +210,7 @@ class CscBleDataSource(
             if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
             when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
                 BluetoothAdapter.STATE_ON -> {
-                    Log.i(TAG, "Bluetooth turned on")
+                    Diag.i(TAG, "Bluetooth turned on")
                     if (wantRunning && !scanning) {
                         // Fresh start: a deliberate toggle shouldn't inherit stale backoff.
                         reconnect.clear()
@@ -216,7 +218,7 @@ class CscBleDataSource(
                     }
                 }
                 BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
-                    Log.w(TAG, "Bluetooth turning off; tearing down BLE")
+                    Diag.w(TAG, "Bluetooth turning off; tearing down BLE")
                     onAdapterOff()
                 }
             }
@@ -270,13 +272,13 @@ class CscBleDataSource(
             scanner.startScan(listOf(filter), settings, scanCallback)
         } catch (e: SecurityException) {
             // Missing BLUETOOTH_SCAN — caller should have requested it first.
-            Log.e(TAG, "scan blocked: missing permission", e)
+            Diag.e(TAG, "scan blocked: missing permission", e)
             _connectionState.value = ConnectionState.DISCONNECTED
             return
         }
         scanning = true
         updateConnectionState()
-        Log.i(TAG, "scanning for CSC sensors")
+        Diag.i(TAG, "scanning for CSC sensors")
     }
 
     private fun stopScan() {
@@ -293,7 +295,7 @@ class CscBleDataSource(
         }
 
         override fun onScanFailed(errorCode: Int) {
-            Log.e(TAG, "scan failed: $errorCode")
+            Diag.e(TAG, "scan failed: $errorCode")
             scanning = false
             updateConnectionState()
         }
@@ -341,16 +343,16 @@ class CscBleDataSource(
         // Claim the slot atomically so a concurrent scan callback + paired-flow emission
         // can't both open a GATT client (which would leak one).
         if (!connection.compareAndSet(null, conn)) return
-        Log.i(TAG, "connecting to $address")
+        Diag.i(TAG, "connecting to $address")
         val gatt = device.connectGatt(context, false, conn)
         if (gatt == null) {
             // connectGatt can return null (BT briefly unavailable, GATT client limit,
             // stale handle). Don't leave a zombie that blocks every reconnect — drop it
             // and arm a backoff so the next scan result retries with a delay.
-            Log.w(TAG, "connectGatt returned null for $address; backing off")
+            Diag.w(TAG, "connectGatt returned null for $address; backing off")
             connection.compareAndSet(conn, null)
             val delay = reconnect.recordFailure(address)
-            Log.w(TAG, "connect to $address abandoned; retrying in ${delay}ms")
+            Diag.w(TAG, "connect to $address abandoned; retrying in ${delay}ms")
             return
         }
         conn.gatt = gatt
@@ -380,7 +382,7 @@ class CscBleDataSource(
     private fun setWheelSupported(address: String, bytes: ByteArray?) {
         val supported = parseWheelSupported(bytes) ?: return
         if (!supported) {
-            Log.w(TAG, "sensor $address does not advertise CSC wheel-revolution support")
+            Diag.w(TAG, "sensor $address does not advertise CSC wheel-revolution support")
         }
         // computeIfPresent + mergeScanResult's carry-forward keep this atomic and safe against
         // the scan-callback rebuild, exactly as for firmware revision — see setFirmwareRevision.
@@ -400,7 +402,7 @@ class CscBleDataSource(
         // purpose — see parseFirmwareRevision returning null and this returning early.)
         seen.computeIfPresent(address) { _, s -> s.copy(firmwareRevision = rev) }
         publishDiscovered()
-        Log.i(TAG, "firmware revision for $address: $rev")
+        Diag.i(TAG, "firmware revision for $address: $rev")
     }
 
     private fun publishDiscovered() {
@@ -492,14 +494,22 @@ class CscBleDataSource(
         @Volatile var ready = false
         private val decoder = CscMeasurementDecoder()
 
+        // Best-effort firmware debug-log channel (NUS). Because only one GATT op may be in
+        // flight, the NUS CCCD write is chained AFTER the CSC one; this flag routes its
+        // completion in onDescriptorWrite without inspecting the descriptor (which the test
+        // suite drives with a throwaway mock). fwLogBuffer reassembles the chunked, '\n'-
+        // delimited byte stream into whole lines for the LogBus.
+        private var awaitingNusCccd = false
+        private val fwLogBuffer = StringBuilder()
+
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "connected $address, discovering services")
+                    Diag.i(TAG, "connected $address, discovering services")
                     g.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.w(TAG, "disconnected $address (status=$status)")
+                    Diag.w(TAG, "disconnected $address (status=$status)")
                     val wasReady = ready
                     g.close()
                     ready = false
@@ -521,7 +531,7 @@ class CscBleDataSource(
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             val measurement = g.getService(CSC_SERVICE_UUID)?.getCharacteristic(CSC_MEASUREMENT_UUID)
             if (measurement == null) {
-                Log.e(TAG, "CSC measurement characteristic not found on $address")
+                Diag.e(TAG, "CSC measurement characteristic not found on $address")
                 return
             }
             g.setCharacteristicNotification(measurement, true)
@@ -537,31 +547,74 @@ class CscBleDataSource(
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            // Second write in the chain: the optional NUS log-channel CCCD. It is best-effort —
+            // whatever its outcome, proceed to the optional reads. (Routed by flag, not by the
+            // descriptor argument, which the connection tests drive with a throwaway mock.)
+            if (awaitingNusCccd) {
+                awaitingNusCccd = false
+                if (status == BluetoothGatt.GATT_SUCCESS) Diag.i(TAG, "subscribed to firmware logs on $address")
+                else Diag.w(TAG, "firmware-log CCCD write failed for $address (status=$status); logs unavailable")
+                startInfoReads(g)
+                return
+            }
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 // Subscription failed: notifications will never arrive, so don't report a
                 // false "CONNECTED". Disconnect to drop into the rescan/reconnect path.
-                Log.e(TAG, "CCCD write failed for $address (status=$status); disconnecting")
+                Diag.e(TAG, "CCCD write failed for $address (status=$status); disconnecting")
                 g.disconnect()
                 return
             }
             ready = true
             reconnect.recordSuccess(address)
             markConnected(address, true)
-            Log.i(TAG, "subscribed to $address")
+            Diag.i(TAG, "subscribed to $address")
 
-            // Now that we're subscribed (the priority), read two optional characteristics —
-            // one GATT read may be in flight at a time, so they CHAIN in onRead(): first the
-            // CSC Feature (confirm wheel-rev support), then the Device Information firmware
-            // revision. If the feature read can't start, skip straight to the firmware read.
-            // (A feature read that starts but whose callback never arrives simply defers the
-            // firmware read to the next clean reconnect — acceptable for best-effort reads.)
+            // Best-effort: also subscribe to the firmware's NUS debug-log channel. If it's
+            // present, the next onDescriptorWrite (awaitingNusCccd) chains into the reads;
+            // otherwise start them now. CONNECTED is already reported above, so a sensor with
+            // no log channel (older firmware) is unaffected.
+            if (subscribeLogChannel(g)) {
+                awaitingNusCccd = true
+                return
+            }
+            startInfoReads(g)
+        }
+
+        /**
+         * Read two optional characteristics — one GATT read may be in flight at a time, so they
+         * CHAIN in onRead(): first the CSC Feature (confirm wheel-rev support), then the Device
+         * Information firmware revision. If the feature read can't start, skip to the firmware read.
+         */
+        private fun startInfoReads(g: BluetoothGatt) {
             if (!startRead(g, CSC_SERVICE_UUID, CSC_FEATURE_UUID)) readFirmwareRevision(g)
+        }
+
+        /**
+         * Subscribes to the firmware's NUS TX log characteristic if the sensor exposes it.
+         * Returns true only when the CCCD write actually initiated (so the caller knows to await
+         * its callback); false — absent service/char/descriptor or a write that didn't start —
+         * means the caller should proceed straight to the optional reads.
+         */
+        private fun subscribeLogChannel(g: BluetoothGatt): Boolean {
+            val logCh = g.getService(NUS_SERVICE_UUID)?.getCharacteristic(NUS_TX_UUID) ?: return false
+            g.setCharacteristicNotification(logCh, true)
+            val cccd = logCh.getDescriptor(CCCD_UUID) ?: return false
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    g.writeDescriptor(cccd)
+                }
+            }
         }
 
         /** Reads the optional DIS firmware revision; logs if the sensor has no such characteristic. */
         private fun readFirmwareRevision(g: BluetoothGatt) {
             if (!startRead(g, DIS_SERVICE_UUID, FIRMWARE_REVISION_UUID)) {
-                Log.w(TAG, "no firmware-revision characteristic to read on $address")
+                Diag.w(TAG, "no firmware-revision characteristic to read on $address")
             }
         }
 
@@ -595,7 +648,7 @@ class CscBleDataSource(
             when (uuid) {
                 CSC_FEATURE_UUID -> {
                     if (status == BluetoothGatt.GATT_SUCCESS) setWheelSupported(address, value)
-                    else Log.w(TAG, "CSC feature read for $address failed: status=$status")
+                    else Diag.w(TAG, "CSC feature read for $address failed: status=$status")
                     readFirmwareRevision(g) // chain regardless of the feature outcome
                 }
                 FIRMWARE_REVISION_UUID -> {
@@ -603,25 +656,52 @@ class CscBleDataSource(
                     // A read that started then failed (vs. old firmware with no DIS, which
                     // never starts a read) leaves firmwareRevision null; log so the two cases
                     // are distinguishable. It refills on the next reconnect, so no retry.
-                    else Log.w(TAG, "firmware-revision read for $address failed: status=$status")
+                    else Diag.w(TAG, "firmware-revision read for $address failed: status=$status")
                 }
                 // Only the two reads above are ever issued. An unexpected UUID here means a
                 // future read was added without a matching arm to kick the next step. The log
                 // surfaces the mistake; the chain still stops here, so the new read must add its
                 // own arm that kicks whatever should follow it.
-                else -> Log.w(TAG, "unexpected characteristic read for $address: $uuid")
+                else -> Diag.w(TAG, "unexpected characteristic read for $address: $uuid")
             }
         }
 
         @Deprecated("Deprecated in API 33; the ByteArray overload is used there")
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
-            if (c.uuid == CSC_MEASUREMENT_UUID) handleMeasurement(c.value)
+            when (c.uuid) {
+                CSC_MEASUREMENT_UUID -> handleMeasurement(c.value)
+                NUS_TX_UUID -> handleLogBytes(c.value)
+            }
         }
 
         // API 33+ overload.
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
-            if (c.uuid == CSC_MEASUREMENT_UUID) handleMeasurement(value)
+            when (c.uuid) {
+                CSC_MEASUREMENT_UUID -> handleMeasurement(value)
+                NUS_TX_UUID -> handleLogBytes(value)
+            }
+        }
+
+        /**
+         * Reassembles the firmware's chunked, '\n'-delimited NUS log stream into whole lines and
+         * pushes each into [LogBus] tagged [LogBus.Source.FW]. Dropped for a torn-down/replaced
+         * connection (mirrors handleMeasurement's identity gate). The buffer is bounded so a
+         * stream that never sends a newline can't grow without limit.
+         */
+        private fun handleLogBytes(bytes: ByteArray?) {
+            if (bytes == null || bytes.isEmpty() || connection.get() !== this) return
+            synchronized(fwLogBuffer) {
+                fwLogBuffer.append(String(bytes, Charsets.UTF_8))
+                var nl = fwLogBuffer.indexOf("\n")
+                while (nl >= 0) {
+                    val line = fwLogBuffer.substring(0, nl).trimEnd('\r')
+                    fwLogBuffer.delete(0, nl + 1)
+                    if (line.isNotEmpty()) LogBus.add(LogBus.Source.FW, LogBus.Level.I, "FW", line)
+                    nl = fwLogBuffer.indexOf("\n")
+                }
+                if (fwLogBuffer.length > 512) fwLogBuffer.delete(0, fwLogBuffer.length - 512)
+            }
         }
 
         private fun handleMeasurement(bytes: ByteArray?) {
@@ -687,6 +767,11 @@ class CscBleDataSource(
         private val CSC_MEASUREMENT_UUID = UUID.fromString("00002a5b-0000-1000-8000-00805f9b34fb")
         private val CSC_FEATURE_UUID = UUID.fromString("00002a5c-0000-1000-8000-00805f9b34fb")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        // Nordic UART Service — the firmware's debug-log channel (see speed.ino). We only
+        // subscribe to the TX (notify) characteristic; the RX direction is unused.
+        private val NUS_SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val NUS_TX_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 
         /**
          * Whether a CSC Feature value (16-bit little-endian, characteristic 0x2A5C) advertises

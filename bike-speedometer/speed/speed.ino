@@ -4,6 +4,7 @@
 #include <esp_mac.h>
 #include <esp_system.h>    // esp_reset_reason() for boot diagnostics
 #include <esp_task_wdt.h>  // task watchdog (requires ESP32 Arduino core 3.x / IDF 5)
+#include <stdarg.h>        // va_list/vsnprintf for the emitLogf() variadic debug logger
 
 // --- Configuration ---
 #define DEVICE_NAME  "Bike Speed"  // a per-device suffix from the MAC is appended at boot
@@ -22,7 +23,18 @@
 #define CSC_MEASUREMENT_UUID  "00002a5b-0000-1000-8000-00805f9b34fb"
 #define CSC_FEATURE_UUID      "00002a5c-0000-1000-8000-00805f9b34fb"
 
+// Nordic UART Service (NUS) — the de-facto "BLE serial port", used here as a one-way debug
+// log channel (device → client). The app subscribes to the TX characteristic on the same
+// connection it already uses for CSC; generic tools (e.g. nRF Connect) can read it too. Only
+// low-rate lines (lifecycle events + the 5 s health line + a boot summary) are streamed, so
+// BLE airtime stays bounded — per-revolution logs remain on USB serial. See emitLogf()/bleLog().
+#define NUS_SERVICE_UUID      "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_TX_UUID           "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
 BLECharacteristic *measurementChar;
+BLECharacteristic *logChar = nullptr;        // NUS TX (debug log notifications), null until setup()
+BLE2902 *logCccd = nullptr;                  // logChar's 0x2902 CCCD; getNotifications() = subscribed?
+esp_reset_reason_t bootReason = ESP_RST_UNKNOWN;  // captured in setup() for the boot summary line
 
 // Wheel revolutions are a UINT32 per the CSC spec — they "cannot practically roll
 // over during the life of the Sensor," so we accumulate without wrapping.
@@ -49,18 +61,57 @@ volatile bool     deviceConnected = false;
 volatile uint32_t disconnectCount = 0;    // BLE drops since boot
 uint32_t          notificationsSent = 0;  // CSC packets sent (loop-only, no sync needed)
 
+// True when a client is connected AND has enabled notifications on the NUS TX CCCD. We poll
+// the descriptor's value (which the BLE stack updates on the client's CCCD write) rather than
+// rely on a descriptor onWrite callback — BLE2902 does not reliably deliver one in this core.
+bool logSubscribed() {
+  return deviceConnected && logCccd != nullptr && logCccd->getNotifications();
+}
+
+// Sends one already-formatted string over the NUS TX characteristic as BLE notifications,
+// but only when a client is connected AND subscribed (so we never waste airtime otherwise).
+// Chunked to 20 bytes — safe for the default 23-byte ATT MTU — and the caller includes a
+// trailing '\n' so the app can reassemble the byte stream into lines.
+void bleLog(const char *s) {
+  if (logChar == nullptr || !logSubscribed()) return;
+  size_t len = strlen(s);
+  const size_t CHUNK = 20;
+  for (size_t off = 0; off < len; off += CHUNK) {
+    size_t n = (len - off < CHUNK) ? (len - off) : CHUNK;
+    logChar->setValue((uint8_t *)(s + off), n);
+    logChar->notify();
+  }
+}
+
+// Emits a diagnostic line to USB serial AND (when subscribed) over BLE. Used for the
+// lifecycle events, the periodic health line, and the boot summary. The format string must
+// NOT include a trailing newline: Serial.println adds one, and a '\n' is appended for BLE.
+void emitLogf(const char *fmt, ...) {
+  char buf[192];
+  va_list ap;
+  va_start(ap, fmt);
+  int len = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);  // -1 leaves room for the BLE '\n'
+  va_end(ap);
+  if (len < 0) return;
+  if ((size_t)len >= sizeof(buf) - 1) len = sizeof(buf) - 2;  // truncated; keep room for '\n'
+  Serial.println(buf);
+  buf[len] = '\n';
+  buf[len + 1] = '\0';
+  bleLog(buf);
+}
+
 // Track connection state (so we only transmit when a client is listening) and
 // restart advertising on disconnect so the sensor is rediscoverable without a
 // power cycle.
 class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *server) override {
     deviceConnected = true;
-    Serial.println("[event] client connected");
+    emitLogf("[event] client connected");
   }
   void onDisconnect(BLEServer *server) override {
-    deviceConnected = false;
+    deviceConnected = false;  // logSubscribed() now returns false, so bleLog() won't touch a dead link
     disconnectCount++;
-    Serial.println("[event] client disconnected; re-advertising");
+    emitLogf("[event] client disconnected; re-advertising");
     server->startAdvertising();
   }
 };
@@ -154,9 +205,10 @@ void setup() {
 
   // Boot diagnostics: the reset reason distinguishes a clean start from a crash or a
   // watchdog reboot; the build stamp confirms which firmware is actually flashed.
+  bootReason = esp_reset_reason();  // kept for the BLE boot summary sent on client subscribe
   Serial.println();
   Serial.println("=== Bike Speed booting ===");
-  Serial.printf("reset reason: %s\n", resetReasonStr(esp_reset_reason()));
+  Serial.printf("reset reason: %s\n", resetReasonStr(bootReason));
   Serial.printf("build:        %s %s\n", __DATE__, __TIME__);
 
   // Append the last two MAC bytes so multiple units are distinguishable in a
@@ -210,6 +262,17 @@ void setup() {
     ->setValue((uint8_t *)FW_REVISION, strlen(FW_REVISION));    // Firmware Revision
   infoService->start();
 
+  // Nordic UART Service: a single notify-only TX characteristic used to stream debug logs to
+  // the app (and generic BLE tools). Its 0x2902 CCCD carries LogCccdCallbacks so the firmware
+  // only transmits while a client is subscribed. Not advertised — the app finds it by service
+  // discovery on the connection it already opens for CSC. (1 service + 1 char + CCCD ≈ 4
+  // handles, well under createService's default 15-handle budget.)
+  BLEService *logService = server->createService(NUS_SERVICE_UUID);
+  logChar = logService->createCharacteristic(NUS_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  logCccd = new BLE2902();             // kept global; logSubscribed() polls its notifications bit
+  logChar->addDescriptor(logCccd);
+  logService->start();
+
   // Advertise using the 16-bit CSC service UUID so cycling apps can discover it
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(BLEUUID((uint16_t)0x1816));
@@ -226,6 +289,18 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();
+
+  // On the rising edge of a client subscribing to logs, send a one-line boot summary so the app
+  // sees the last reset cause (e.g. a watchdog reboot) and build stamp immediately, without a
+  // serial console. Edge-detected by polling logSubscribed() (which tracks the CCCD bit and the
+  // link), so it re-fires for each fresh subscriber after a reconnect.
+  static bool prevLogSub = false;
+  bool nowLogSub = logSubscribed();
+  if (nowLogSub && !prevLogSub) {
+    emitLogf("[boot] reset=%s build=%s %s fw=%s", resetReasonStr(bootReason),
+             __DATE__, __TIME__, FW_VERSION);
+  }
+  prevLogSub = nowLogSub;
 
   // Drain every buffered revolution (one CSC notification each, so a burst is never
   // collapsed into one packet). Read rbHead with acquire to pair with the ISR's release.
@@ -269,8 +344,10 @@ void loop() {
     float rate = dt > 0.0f ? (revs - lastHealthRevs) / dt : 0.0f;
     lastHealth = nowMs;
     lastHealthRevs = revs;
-    Serial.printf(
-      "[health] up=%lus revs=%lu rate=%.1f/s drops=%lu hwm=%u/%u notif=%lu conn=%d disc=%lu heap=%lu\n",
+    // emitLogf mirrors this to USB serial AND (when subscribed) over BLE; no trailing '\n'
+    // in the format — emitLogf adds it for both sinks.
+    emitLogf(
+      "[health] up=%lus revs=%lu rate=%.1f/s drops=%lu hwm=%u/%u notif=%lu conn=%d disc=%lu heap=%lu",
       nowMs / 1000, (unsigned long)revs, rate, (unsigned long)droppedRevolutions,
       rbHighWater, RB_SIZE - 1, (unsigned long)notificationsSent,
       deviceConnected ? 1 : 0, (unsigned long)disconnectCount, (unsigned long)ESP.getFreeHeap());

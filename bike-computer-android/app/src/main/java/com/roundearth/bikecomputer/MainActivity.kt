@@ -18,6 +18,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.roundearth.bikecomputer.ui.dashboard.BikeViewModel
 import com.roundearth.bikecomputer.ui.dashboard.DashboardScreen
+import com.roundearth.bikecomputer.ui.logs.LogScreen
 import com.roundearth.bikecomputer.ui.sensors.SensorScreen
 import com.roundearth.bikecomputer.ui.sensors.SensorViewModel
 import com.roundearth.bikecomputer.ui.settings.SettingsScreen
@@ -75,10 +76,14 @@ class MainActivity : ComponentActivity() {
                             viewModel = settingsVm,
                             onBack = { nav.popBackStack() },
                             onSensorsClick = { nav.navigate("sensors") },
+                            onLogsClick = { nav.navigate("logs") },
                         )
                     }
                     composable("sensors") {
                         SensorScreen(viewModel = sensorVm, onBack = { nav.popBackStack() })
+                    }
+                    composable("logs") {
+                        LogScreen(onBack = { nav.popBackStack() })
                     }
                 }
             }

@@ -71,7 +71,12 @@ private val WHEEL_PRESETS = listOf(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsClick: () -> Unit) {
+fun SettingsScreen(
+    viewModel: SettingsViewModel,
+    onBack: () -> Unit,
+    onSensorsClick: () -> Unit,
+    onLogsClick: () -> Unit,
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     // Always format the editable fields with '.' (Locale.US) because the SET handlers
@@ -146,6 +151,18 @@ fun SettingsScreen(viewModel: SettingsViewModel, onBack: () -> Unit, onSensorsCl
                 border = BorderStroke(1.dp, Divider),
             ) {
                 Text("Manage Bluetooth Sensors")
+            }
+
+            Spacer(Modifier.height(28.dp))
+            SectionLabel("DIAGNOSTICS")
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onLogsClick,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                border = BorderStroke(1.dp, Divider),
+            ) {
+                Text("View Logs (app + firmware)")
             }
 
             Spacer(Modifier.height(28.dp))
