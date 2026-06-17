@@ -119,6 +119,14 @@ reconnects fast), recovers from a Bluetooth adapter toggle, and only reports
 `CONNECTED` after the notification subscription is confirmed — never on a bare GATT
 link. The reconnect math is unit-tested in `ReconnectPolicyTest`.
 
+Every *app-initiated* teardown (backgrounding, adapter-off, switching sensors, losing
+the connect race) calls `disconnect()` **before** `close()`. `BluetoothGatt.close()`
+only releases the local client handle — it does not drop the ACL link — so a bare close
+strands the sensor connected to nobody (the firmware keeps `conn=1`) until its supervision
+timeout fires as a `status=8`, and the next foreground layers a duplicate link over the
+stale one. The unsolicited-drop callback is the one exception: it runs after the link is
+already down, so it closes directly. This ordering is pinned by `stop_disconnectsRadioLinkBeforeClosing`.
+
 ## Deliberate non-goals
 
 These are settled simplifications for a single-user app, not gaps:

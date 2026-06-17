@@ -195,7 +195,7 @@ class CscBleDataSource(
         wantRunning = false
         unregisterBtStateReceiver()
         stopScan()
-        connection.getAndSet(null)?.gatt?.close()
+        disconnectAndClose(connection.getAndSet(null)?.gatt)
         reconnect.clear()
         staleJob?.cancel(); staleJob = null
         headingJob?.cancel(); headingJob = null
@@ -253,7 +253,7 @@ class CscBleDataSource(
      */
     private fun onAdapterOff() {
         scanning = false
-        connection.getAndSet(null)?.gatt?.close()
+        disconnectAndClose(connection.getAndSet(null)?.gatt)
         reconnect.clear()
         seen.keys.forEach { addr -> seen.computeIfPresent(addr) { _, s -> s.copy(connected = false) } }
         publishDiscovered()
@@ -361,15 +361,33 @@ class CscBleDataSource(
         // slot in the window before this line publishes conn.gatt — it would then find
         // conn.gatt == null and close nothing, leaking this live GATT client (one of Android's
         // few per-app slots). Re-check ownership and close it ourselves if we lost the race.
-        if (connection.get() !== conn) gatt.close()
+        if (connection.get() !== conn) disconnectAndClose(gatt)
     }
 
     /** Drops [conn] if it is still the live connection (e.g. the user picked another sensor). */
     private fun teardown(conn: SensorConnection) {
         if (connection.compareAndSet(conn, null)) {
-            conn.gatt?.close()
+            disconnectAndClose(conn.gatt)
             markConnected(conn.address, false)
         }
+    }
+
+    /**
+     * Tears down an APP-INITIATED GATT link (stop/onAdapterOff/teardown/lost-race), as opposed to
+     * an unsolicited drop. Android's [BluetoothGatt.close] only releases the local client handle —
+     * it does NOT terminate the radio link, so a bare close() strands the peer "connected" to
+     * nobody: the sensor keeps its ACL up (firmware reports conn=1, disc=0) until its own
+     * supervision timeout fires. The next foreground then opens a fresh client and re-attaches over
+     * that still-live link — the firmware logs no new connect/disconnect — and the orphaned link
+     * eventually dies with a status=8 GATT_CONN_TIMEOUT. disconnect() first asks the stack to drop
+     * the ACL so the sensor sees a clean disconnect and can re-advertise; close() then frees the
+     * client. (The unsolicited-drop path in onConnectionStateChange runs AFTER the link is already
+     * down, so it still closes directly — there is nothing left to disconnect.)
+     */
+    private fun disconnectAndClose(gatt: BluetoothGatt?) {
+        gatt ?: return
+        gatt.disconnect()
+        gatt.close()
     }
 
     private fun markConnected(address: String, connected: Boolean) {
