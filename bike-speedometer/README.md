@@ -76,6 +76,7 @@ All configuration is at the top of `speed/speed.ino`:
 | `FW_VERSION` | `"1.0"` | Firmware version string reported (with the build date) over the Device Information Service `0x2A26` |
 | `SENSOR_PIN` | `D0` | GPIO pin connected to the hall effect sensor |
 | `MIN_MS` | `60` | Minimum milliseconds between triggers (debounce; ~125 km/h ceiling on a 2.1 m wheel) |
+| `SELFTEST_WINDOW_MS` | `8000` | Boot wiring self-test window: how long to wait for a magnet pass to confirm the hall sensor's GND/V/OUT wiring (LED flashes 3x on success). `0` skips the wait |
 | `WDT_TIMEOUT_S` | `5` | Task-watchdog timeout; reboots if `loop()` stalls (e.g. a wedged BLE stack) |
 | `HEALTH_INTERVAL_MS` | `5000` | How often the serial health line is printed |
 | `DEBUG_VERBOSE` | `0` | `0` (field default) prints only the health line and lifecycle events; `1` (bench bring-up) also logs every revolution |
@@ -92,8 +93,10 @@ Connect at 115200 baud to watch the serial output:
 ```
 === Bike Speed booting ===
 reset reason: power-on
+prev run:     RTC RAM cleared — VDD was fully removed (unplug / power-bank auto-shutoff), or a deep brownout
 build:        <compile date/time>
 advertising as: Bike Speed 3F9A
+[alive] up=1s conn=0 heap=213120   # 1 Hz heartbeat for the first 5 s (see "Power / boot diagnostics")
 [event] client connected
 [rev] revs=1 t=1043   # only with DEBUG_VERBOSE=1; omitted at the field default (0)
 [health] up=5s revs=12 rate=2.4/s drops=0 hwm=2/31 notif=12 conn=1 disc=0 heap=212044
@@ -116,3 +119,70 @@ a signal to investigate what stalled the loop.
 
 The onboard LED also shows link state: **solid** when a client is connected, **~1 Hz blink**
 while advertising.
+
+### Power / boot diagnostics
+
+If the sensor **"shuts off" or resets after a few seconds**, the firmware logs enough to tell
+which of three causes it is — the same lines stream over BLE (the `[boot]`/`[alive]` log
+characteristic), so you can read them in the app without a serial console:
+
+- **`reset reason:`** — the cause of the *last* reset, with a remedy hint appended for the
+  faulty ones (`brownout`, `task watchdog`, `panic/exception`).
+- **`prev run:`** — derived from a marker kept in the always-on **RTC RAM**, which survives a
+  watchdog reset (and a shallow brownout) but is *lost when VDD is fully removed* — an unplug, a
+  power bank that auto-shut-off, or a deep brownout that collapses VDD toward 0. So "RTC RAM
+  cleared" means power was actually cut; "survived Ns" means the chip reset itself while still
+  powered. (The marker is trusted only when the reset reason isn't itself a power-on, so a fast
+  re-plug can't fake a "retained".)
+- **`[alive] up=Ns`** — a 1 Hz heartbeat for the first 5 s. A unit that dies at ~3 s prints
+  `up=1s`, `up=2s`, `up=3s`, then nothing, so you can *see* how long it ran before it died (the
+  first full `[health]` line otherwise only appears at 5 s).
+
+Putting it together:
+
+| reset reason | `prev run` | likely cause | fix |
+|---|---|---|---|
+| `power-on` | RTC RAM cleared | **power bank auto-shutoff** (low draw) or a loose plug | wall/PC USB, or a bank with a low-current "trickle" mode |
+| `brownout` | (either) | supply sag — thin/long cable, tired bank, or **missing U.FL antenna** | better cable/supply; confirm the antenna is attached |
+| `task watchdog` | survived Ns | `loop()` stalled > `WDT_TIMEOUT_S` (e.g. a wedged BLE stack) | investigate what blocked the loop |
+
+A power-bank-powered, BLE-only sensor draws only tens of mA, **below the keep-alive threshold of
+many power banks** — the most common "it just turns off after a few seconds" cause, and exactly
+what the `power-on` + "RTC RAM cleared" combination confirms.
+
+## Wiring self-test
+
+At power-on the firmware runs a quick wiring self-test before it starts counting revolutions.
+During an `SELFTEST_WINDOW_MS` window (8 s by default) the LED **winks rapidly** — pass the
+magnet by the sensor once during this window and, if the sensor responds, the LED **flashes
+three times** to confirm the wiring.
+
+Why a magnet pass is the test: the A3144 is open-collector and active low, so an idle
+(untriggered) sensor and a *disconnected* `OUT` pin both read HIGH through the MCU's pull-up —
+indistinguishable. Only a sensor that is powered (**V** and **GND** correct) *and* whose
+`OUT` actually reaches **D0** (signal correct) can sink the line LOW, so a debounced
+HIGH→sustained-LOW transition confirms all three wires at once. The self-test first establishes
+the idle-HIGH baseline, then watches for that transition. The serial log shows the result:
+
+```
+[selftest] line idle HIGH; pass a magnet within 8s to confirm wiring...
+[selftest] PASS: magnet detected — GND, V and OUT all wired correctly
+```
+
+A momentary low at boot is **not** treated as a fault: a wheel parked with the magnet next to
+the sensor holds a correctly-wired output low until it moves, so the test waits for the line to
+clear to HIGH first. Only a line that **never clears** for the whole window
+(`[selftest] FAIL: signal stuck LOW`) is reported as a fault — `OUT` shorted to GND, or a jammed
+sensor. If no magnet is waved within the window the test is **inconclusive** (not a failure) and
+the sensor boots normally — so a bike-mounted unit on a power bank isn't blocked just because
+nobody waved a magnet at it.
+
+Because the self-test runs before any client can connect, its verdict is also **replayed over
+BLE** in the `[boot]` summary the moment the app subscribes to the log characteristic — so the
+wiring result is visible in the app, not just on a serial console:
+
+```
+[selftest] wiring PASS — magnet seen: GND, V and OUT all wired correctly
+[selftest] wiring inconclusive — no magnet waved at boot (wave one within the window and reboot to confirm)
+[selftest] wiring FAIL — signal stuck LOW (OUT shorted to GND, or sensor jammed on)
+```
