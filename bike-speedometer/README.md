@@ -76,6 +76,7 @@ All configuration is at the top of `speed/speed.ino`:
 | `FW_VERSION` | `"1.0"` | Firmware version string reported (with the build date) over the Device Information Service `0x2A26` |
 | `SENSOR_PIN` | `D0` | GPIO pin connected to the hall effect sensor |
 | `MIN_MS` | `60` | Minimum milliseconds between triggers (debounce; ~125 km/h ceiling on a 2.1 m wheel) |
+| `SELFTEST_WINDOW_MS` | `8000` | Boot wiring self-test window: how long to wait for a magnet pass to confirm the hall sensor's GND/V/OUT wiring (LED flashes 3x on success). `0` skips the wait |
 | `WDT_TIMEOUT_S` | `5` | Task-watchdog timeout; reboots if `loop()` stalls (e.g. a wedged BLE stack) |
 | `HEALTH_INTERVAL_MS` | `5000` | How often the serial health line is printed |
 | `DEBUG_VERBOSE` | `0` | `0` (field default) prints only the health line and lifecycle events; `1` (bench bring-up) also logs every revolution |
@@ -116,3 +117,30 @@ a signal to investigate what stalled the loop.
 
 The onboard LED also shows link state: **solid** when a client is connected, **~1 Hz blink**
 while advertising.
+
+## Wiring self-test
+
+At power-on the firmware runs a quick wiring self-test before it starts counting revolutions.
+During an `SELFTEST_WINDOW_MS` window (8 s by default) the LED **winks rapidly** — pass the
+magnet by the sensor once during this window and, if the sensor responds, the LED **flashes
+three times** to confirm the wiring.
+
+Why a magnet pass is the test: the A3144 is open-collector and active low, so an idle
+(untriggered) sensor and a *disconnected* `OUT` pin both read HIGH through the MCU's pull-up —
+indistinguishable. Only a sensor that is powered (**V** and **GND** correct) *and* whose
+`OUT` actually reaches **D0** (signal correct) can sink the line LOW, so a debounced
+HIGH→sustained-LOW transition confirms all three wires at once. The self-test first establishes
+the idle-HIGH baseline, then watches for that transition. The serial log shows the result:
+
+```
+[selftest] line idle HIGH; pass a magnet within 8s to confirm wiring...
+[selftest] PASS: magnet detected — GND, V and OUT all wired correctly
+```
+
+A momentary low at boot is **not** treated as a fault: a wheel parked with the magnet next to
+the sensor holds a correctly-wired output low until it moves, so the test waits for the line to
+clear to HIGH first. Only a line that **never clears** for the whole window
+(`[selftest] FAIL: signal stuck LOW`) is reported as a fault — `OUT` shorted to GND, or a jammed
+sensor. If no magnet is waved within the window the test is **inconclusive** (not a failure) and
+the sensor boots normally — so a bike-mounted unit on a power bank isn't blocked just because
+nobody waved a magnet at it.
