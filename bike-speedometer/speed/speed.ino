@@ -41,9 +41,10 @@ BLE2902 *logCccd = nullptr;                  // logChar's 0x2902 CCCD; getNotifi
 esp_reset_reason_t bootReason = ESP_RST_UNKNOWN;  // captured in setup() for the boot summary line
 
 // Power-loss boot diagnostic. RTC_NOINIT_ATTR lives in the always-on RTC RAM domain: it is NOT
-// re-initialized at startup, so it survives a software/watchdog/brownout reset but is lost (the
-// VERY thing we test for) when VDD is fully removed — an unplug or a power bank that auto-shuts
-// off under the sensor's low draw. So on boot, a matching magic marker means "RTC RAM was
+// re-initialized at startup, so it survives a software/watchdog reset (and a shallow brownout that
+// stays above the RTC retention floor) but is lost (the VERY thing we test for) when VDD is fully
+// removed — an unplug, a power bank that auto-shuts off under the sensor's low draw, or a deep
+// brownout that collapses VDD toward 0. So on boot, a matching magic marker means "RTC RAM was
 // retained → NOT a full power loss"; a mismatch means power was actually cut. Combined with the
 // reset reason this separates the three "shuts off after a few seconds" causes: power-bank
 // cutoff (reason power-on, RTC cleared), brownout (reason brownout), watchdog (reason task wdt).
@@ -369,7 +370,13 @@ void setup() {
   // loss (so a "shuts off" complaint is a brownout/watchdog, not a power-bank cutoff/unplug);
   // if it was cleared, VDD was actually removed. Then re-arm the marker and reset the uptime
   // store for this run (loop() keeps rtcPrevUptimeS current so the NEXT boot can report it).
-  rtcRetained = (rtcBootMagic == RTC_BOOT_MAGIC);
+  //
+  // Trust the marker only when the reset reason is consistent with the chip having stayed powered:
+  // a power-on reset means VDD WAS cycled by definition, so distrust a "retained"-looking marker
+  // then — that kills both the ~1-in-2^32 first-cold-boot magic match and a fast re-plug that left
+  // the RTC caps charged (both report reason power-on). Unknown reset reason is distrusted too.
+  rtcRetained = (rtcBootMagic == RTC_BOOT_MAGIC) &&
+                bootReason != ESP_RST_POWERON && bootReason != ESP_RST_UNKNOWN;
   prevUptimeS = rtcRetained ? rtcPrevUptimeS : 0;
   rtcBootMagic = RTC_BOOT_MAGIC;
   rtcPrevUptimeS = 0;

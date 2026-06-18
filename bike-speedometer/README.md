@@ -129,9 +129,11 @@ characteristic), so you can read them in the app without a serial console:
 - **`reset reason:`** — the cause of the *last* reset, with a remedy hint appended for the
   faulty ones (`brownout`, `task watchdog`, `panic/exception`).
 - **`prev run:`** — derived from a marker kept in the always-on **RTC RAM**, which survives a
-  brownout or watchdog reset but is *lost when VDD is fully removed*. So "RTC RAM cleared" means
-  power was actually cut (an unplug, or a power bank that auto-shut-off under the sensor's low
-  draw); "survived Ns" means the chip reset itself while still powered.
+  watchdog reset (and a shallow brownout) but is *lost when VDD is fully removed* — an unplug, a
+  power bank that auto-shut-off, or a deep brownout that collapses VDD toward 0. So "RTC RAM
+  cleared" means power was actually cut; "survived Ns" means the chip reset itself while still
+  powered. (The marker is trusted only when the reset reason isn't itself a power-on, so a fast
+  re-plug can't fake a "retained".)
 - **`[alive] up=Ns`** — a 1 Hz heartbeat for the first 5 s. A unit that dies at ~3 s prints
   `up=1s`, `up=2s`, `up=3s`, then nothing, so you can *see* how long it ran before it died (the
   first full `[health]` line otherwise only appears at 5 s).
