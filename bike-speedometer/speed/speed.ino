@@ -53,6 +53,12 @@ RTC_NOINIT_ATTR uint32_t rtcPrevUptimeS;  // seconds the previous run survived (
 bool     rtcRetained = false;             // set in setup(): true = RTC RAM survived (no full power loss)
 uint32_t prevUptimeS = 0;                 // previous run's survived seconds, when rtcRetained
 
+// Outcome of the power-on wiring self-test (selfTestWiring()), captured so loop() can replay it
+// over BLE when a client subscribes — the test runs in setup() before any client connects, so its
+// serial lines would otherwise never reach the app (the only log a field unit has).
+enum WiringResult { WIRING_UNTESTED = 0, WIRING_PASS, WIRING_INCONCLUSIVE, WIRING_FAIL_STUCK_LOW, WIRING_DISABLED };
+WiringResult wiringResult = WIRING_UNTESTED;
+
 // Wheel revolutions are a UINT32 per the CSC spec — they "cannot practically roll
 // over during the life of the Sensor," so we accumulate without wrapping.
 volatile uint32_t wheelRevolutions = 0;
@@ -211,6 +217,19 @@ const char *resetReasonHint(esp_reset_reason_t r) {
   }
 }
 
+// Human-readable wiring self-test outcome for the BLE [boot] summary, so the app shows whether
+// the hall sensor is correctly wired (the serial lines selfTestWiring() prints are invisible to
+// a field unit with no serial console).
+const char *wiringResultStr(WiringResult r) {
+  switch (r) {
+    case WIRING_PASS:           return "PASS — magnet seen: GND, V and OUT all wired correctly";
+    case WIRING_INCONCLUSIVE:   return "inconclusive — no magnet waved at boot (wave one within the window and reboot to confirm)";
+    case WIRING_FAIL_STUCK_LOW: return "FAIL — signal stuck LOW (OUT shorted to GND, or sensor jammed on)";
+    case WIRING_DISABLED:       return "skipped (SELFTEST_WINDOW_MS=0)";
+    default:                    return "untested";
+  }
+}
+
 // Blinks the onboard LED n times (active low: LOW = on, HIGH = off). Blocking — only
 // called from the boot self-test, before the watchdog is armed, so the delays can't trip it.
 void blinkLed(uint8_t n, uint16_t onMs, uint16_t offMs) {
@@ -244,7 +263,10 @@ void blinkLed(uint8_t n, uint16_t onMs, uint16_t offMs) {
 // disturbs the revolution count nor races the ISR, and its blocking waits predate the WDT.
 // Returns true only when a magnet pass confirmed the wiring.
 bool selfTestWiring() {
-  if (SELFTEST_WINDOW_MS == 0) return false;  // self-test disabled (setup() already set INPUT_PULLUP)
+  if (SELFTEST_WINDOW_MS == 0) {              // self-test disabled (setup() already set INPUT_PULLUP)
+    wiringResult = WIRING_DISABLED;
+    return false;
+  }
 
   // A genuine magnet pass holds OUT low for many ms; a disconnected (floating, antenna-like) OUT
   // can momentarily dip low for a single sample. Require the low to PERSIST this long before we
@@ -288,6 +310,7 @@ bool selfTestWiring() {
         // A debounced HIGH→sustained-LOW transition: only a sensor that is powered (V + GND) AND
         // whose OUT reaches D0 can produce it, so this confirms all three wires at once.
         emitLogf("[selftest] PASS: magnet detected — GND, V and OUT all wired correctly");
+        wiringResult = WIRING_PASS;
         // Let the line return HIGH before setup() arms the FALLING-edge ISR, so a still-present
         // magnet doesn't cost the first revolution (FALLING needs a HIGH→LOW transition).
         unsigned long clearStart = millis();
@@ -305,9 +328,11 @@ bool selfTestWiring() {
 
   digitalWrite(LED_BUILTIN, HIGH);  // LED off; loop() takes over the status pattern
   if (!sawHigh) {
+    wiringResult = WIRING_FAIL_STUCK_LOW;
     emitLogf("[selftest] FAIL: signal stuck LOW for %ds (OUT shorted to GND, or sensor jammed on)",
              SELFTEST_WINDOW_MS / 1000);
   } else {
+    wiringResult = WIRING_INCONCLUSIVE;
     emitLogf("[selftest] inconclusive: no magnet seen in %ds (booting normally)",
              SELFTEST_WINDOW_MS / 1000);
   }
@@ -464,6 +489,9 @@ void loop() {
     } else {
       emitLogf("[boot] power was fully removed since last run (unplug / power-bank cutoff, or a deep brownout)");
     }
+    // Replay the power-on wiring self-test verdict: it ran before any client could subscribe, so
+    // this is the only way the app learns whether the hall sensor is correctly wired.
+    emitLogf("[selftest] wiring %s", wiringResultStr(wiringResult));
   }
   prevLogSub = nowLogSub;
 

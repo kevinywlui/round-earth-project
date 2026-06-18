@@ -174,3 +174,13 @@ clear to HIGH first. Only a line that **never clears** for the whole window
 sensor. If no magnet is waved within the window the test is **inconclusive** (not a failure) and
 the sensor boots normally — so a bike-mounted unit on a power bank isn't blocked just because
 nobody waved a magnet at it.
+
+Because the self-test runs before any client can connect, its verdict is also **replayed over
+BLE** in the `[boot]` summary the moment the app subscribes to the log characteristic — so the
+wiring result is visible in the app, not just on a serial console:
+
+```
+[selftest] wiring PASS — magnet seen: GND, V and OUT all wired correctly
+[selftest] wiring inconclusive — no magnet waved at boot (wave one within the window and reboot to confirm)
+[selftest] wiring FAIL — signal stuck LOW (OUT shorted to GND, or sensor jammed on)
+```
