@@ -93,8 +93,10 @@ Connect at 115200 baud to watch the serial output:
 ```
 === Bike Speed booting ===
 reset reason: power-on
+prev run:     RTC RAM cleared — VDD was fully removed (unplug / power-bank auto-shutoff), or a deep brownout
 build:        <compile date/time>
 advertising as: Bike Speed 3F9A
+[alive] up=1s conn=0 heap=213120   # 1 Hz heartbeat for the first 5 s (see "Power / boot diagnostics")
 [event] client connected
 [rev] revs=1 t=1043   # only with DEBUG_VERBOSE=1; omitted at the field default (0)
 [health] up=5s revs=12 rate=2.4/s drops=0 hwm=2/31 notif=12 conn=1 disc=0 heap=212044
@@ -117,6 +119,34 @@ a signal to investigate what stalled the loop.
 
 The onboard LED also shows link state: **solid** when a client is connected, **~1 Hz blink**
 while advertising.
+
+### Power / boot diagnostics
+
+If the sensor **"shuts off" or resets after a few seconds**, the firmware logs enough to tell
+which of three causes it is — the same lines stream over BLE (the `[boot]`/`[alive]` log
+characteristic), so you can read them in the app without a serial console:
+
+- **`reset reason:`** — the cause of the *last* reset, with a remedy hint appended for the
+  faulty ones (`brownout`, `task watchdog`, `panic/exception`).
+- **`prev run:`** — derived from a marker kept in the always-on **RTC RAM**, which survives a
+  brownout or watchdog reset but is *lost when VDD is fully removed*. So "RTC RAM cleared" means
+  power was actually cut (an unplug, or a power bank that auto-shut-off under the sensor's low
+  draw); "survived Ns" means the chip reset itself while still powered.
+- **`[alive] up=Ns`** — a 1 Hz heartbeat for the first 5 s. A unit that dies at ~3 s prints
+  `up=1s`, `up=2s`, `up=3s`, then nothing, so you can *see* how long it ran before it died (the
+  first full `[health]` line otherwise only appears at 5 s).
+
+Putting it together:
+
+| reset reason | `prev run` | likely cause | fix |
+|---|---|---|---|
+| `power-on` | RTC RAM cleared | **power bank auto-shutoff** (low draw) or a loose plug | wall/PC USB, or a bank with a low-current "trickle" mode |
+| `brownout` | (either) | supply sag — thin/long cable, tired bank, or **missing U.FL antenna** | better cable/supply; confirm the antenna is attached |
+| `task watchdog` | survived Ns | `loop()` stalled > `WDT_TIMEOUT_S` (e.g. a wedged BLE stack) | investigate what blocked the loop |
+
+A power-bank-powered, BLE-only sensor draws only tens of mA, **below the keep-alive threshold of
+many power banks** — the most common "it just turns off after a few seconds" cause, and exactly
+what the `power-on` + "RTC RAM cleared" combination confirms.
 
 ## Wiring self-test
 

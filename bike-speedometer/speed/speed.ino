@@ -4,6 +4,7 @@
 #include <esp_mac.h>
 #include <esp_system.h>    // esp_reset_reason() for boot diagnostics
 #include <esp_task_wdt.h>  // task watchdog (requires ESP32 Arduino core 3.x / IDF 5)
+#include <esp_attr.h>      // RTC_NOINIT_ATTR — retained-RAM marker for the power-loss boot diagnostic
 #include <stdarg.h>        // va_list/vsnprintf for the emitLogf() variadic debug logger
 
 // --- Configuration ---
@@ -38,6 +39,19 @@ BLECharacteristic *measurementChar;
 BLECharacteristic *logChar = nullptr;        // NUS TX (debug log notifications), null until setup()
 BLE2902 *logCccd = nullptr;                  // logChar's 0x2902 CCCD; getNotifications() = subscribed?
 esp_reset_reason_t bootReason = ESP_RST_UNKNOWN;  // captured in setup() for the boot summary line
+
+// Power-loss boot diagnostic. RTC_NOINIT_ATTR lives in the always-on RTC RAM domain: it is NOT
+// re-initialized at startup, so it survives a software/watchdog/brownout reset but is lost (the
+// VERY thing we test for) when VDD is fully removed — an unplug or a power bank that auto-shuts
+// off under the sensor's low draw. So on boot, a matching magic marker means "RTC RAM was
+// retained → NOT a full power loss"; a mismatch means power was actually cut. Combined with the
+// reset reason this separates the three "shuts off after a few seconds" causes: power-bank
+// cutoff (reason power-on, RTC cleared), brownout (reason brownout), watchdog (reason task wdt).
+#define RTC_BOOT_MAGIC 0xB1CE5EEDu        // arbitrary sentinel; any fixed non-trivial value
+RTC_NOINIT_ATTR uint32_t rtcBootMagic;    // == RTC_BOOT_MAGIC iff RTC RAM survived the last reset
+RTC_NOINIT_ATTR uint32_t rtcPrevUptimeS;  // seconds the previous run survived (valid iff magic matched)
+bool     rtcRetained = false;             // set in setup(): true = RTC RAM survived (no full power loss)
+uint32_t prevUptimeS = 0;                 // previous run's survived seconds, when rtcRetained
 
 // Wheel revolutions are a UINT32 per the CSC spec — they "cannot practically roll
 // over during the life of the Sensor," so we accumulate without wrapping.
@@ -184,6 +198,19 @@ const char *resetReasonStr(esp_reset_reason_t r) {
   }
 }
 
+// A remedy hint for the reset reasons that signal a fault, so the boot log points at the likely
+// fix without the reader consulting a table. Empty string for benign reasons (power-on, etc.).
+const char *resetReasonHint(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_BROWNOUT: return "supply sagged — check the cable/power bank and that the U.FL antenna is attached";
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_WDT:      return "loop() stalled past WDT_TIMEOUT_S — a wedged BLE stack?";
+    case ESP_RST_PANIC:    return "firmware crash — see the panic backtrace on serial";
+    default:               return "";
+  }
+}
+
 // Blinks the onboard LED n times (active low: LOW = on, HIGH = off). Blocking — only
 // called from the boot self-test, before the watchdog is armed, so the delays can't trip it.
 void blinkLed(uint8_t n, uint16_t onMs, uint16_t offMs) {
@@ -312,9 +339,26 @@ void setup() {
   // Boot diagnostics: the reset reason distinguishes a clean start from a crash or a
   // watchdog reboot; the build stamp confirms which firmware is actually flashed.
   bootReason = esp_reset_reason();  // kept for the BLE boot summary sent on client subscribe
+
+  // Read the retained-RAM marker BEFORE we rewrite it: if it survived, this was not a full power
+  // loss (so a "shuts off" complaint is a brownout/watchdog, not a power-bank cutoff/unplug);
+  // if it was cleared, VDD was actually removed. Then re-arm the marker and reset the uptime
+  // store for this run (loop() keeps rtcPrevUptimeS current so the NEXT boot can report it).
+  rtcRetained = (rtcBootMagic == RTC_BOOT_MAGIC);
+  prevUptimeS = rtcRetained ? rtcPrevUptimeS : 0;
+  rtcBootMagic = RTC_BOOT_MAGIC;
+  rtcPrevUptimeS = 0;
+
+  const char *hint = resetReasonHint(bootReason);
   Serial.println();
   Serial.println("=== Bike Speed booting ===");
-  Serial.printf("reset reason: %s\n", resetReasonStr(bootReason));
+  Serial.printf("reset reason: %s%s%s\n", resetReasonStr(bootReason), hint[0] ? "  <- " : "", hint);
+  if (rtcRetained) {
+    Serial.printf("prev run:     survived %lus before this reset (RTC RAM retained — not a full power loss)\n",
+                  (unsigned long)prevUptimeS);
+  } else {
+    Serial.println("prev run:     RTC RAM cleared — VDD was fully removed (unplug / power-bank auto-shutoff), or a deep brownout");
+  }
   Serial.printf("build:        %s %s\n", __DATE__, __TIME__);
 
   // Append the last two MAC bytes so multiple units are distinguishable in a
@@ -410,6 +454,16 @@ void loop() {
   if (nowLogSub && !prevLogSub) {
     emitLogf("[boot] reset=%s build=%s %s fw=%s", resetReasonStr(bootReason),
              __DATE__, __TIME__, FW_VERSION);
+    // Mirror the power diagnostic over BLE — for a power-bank/brownout death the app is the only
+    // place this is visible, since the unit isn't on a serial console out in the field.
+    const char *hint = resetReasonHint(bootReason);
+    if (hint[0]) emitLogf("[boot] hint: %s", hint);
+    if (rtcRetained) {
+      emitLogf("[boot] prev run survived %lus before this reset (not a full power loss)",
+               (unsigned long)prevUptimeS);
+    } else {
+      emitLogf("[boot] power was fully removed since last run (unplug / power-bank cutoff, or a deep brownout)");
+    }
   }
   prevLogSub = nowLogSub;
 
@@ -438,11 +492,26 @@ void loop() {
     }
   }
 
+  unsigned long nowMs = millis();
+
+  // Keep the retained-RAM uptime current so the NEXT boot can report how long this run survived
+  // before a reset (a cheap RTC-RAM write; see the rtcBootMagic diagnostic above).
+  rtcPrevUptimeS = nowMs / 1000;
+
+  // Early boot heartbeat: until the first HEALTH_INTERVAL_MS health line, tick uptime once per
+  // second so a unit that dies within "a few seconds" (a power-bank auto-shutoff or brownout)
+  // still leaves a trail of how long it ran — the first full health line only appears at 5 s.
+  static unsigned long lastTick = 0;
+  if (nowMs < HEALTH_INTERVAL_MS && nowMs - lastTick >= 1000) {
+    lastTick = nowMs;
+    emitLogf("[alive] up=%lus conn=%d heap=%lu", nowMs / 1000, deviceConnected ? 1 : 0,
+             (unsigned long)ESP.getFreeHeap());
+  }
+
   // Periodic health line for field diagnostics: uptime, revolution rate, dropped
   // events, ring-buffer high-water mark, notifications sent, link state, and free heap.
   static unsigned long lastHealth = 0;
   static uint32_t lastHealthRevs = 0;
-  unsigned long nowMs = millis();
   if (nowMs - lastHealth >= HEALTH_INTERVAL_MS) {
     // These ISR-written counters (wheelRevolutions, droppedRevolutions, disconnectCount,
     // and the uint8_t rbHighWater below) are read here without the acquire/release the
