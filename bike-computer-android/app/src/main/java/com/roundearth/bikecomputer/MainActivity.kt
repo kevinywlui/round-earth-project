@@ -36,15 +36,14 @@ class MainActivity : ComponentActivity() {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
-    // Notification permission is best-effort and requested alongside the BLE ones (below) but never
-    // gates collection: on Android 13+ a denied grant only hides the foreground notice, the service
-    // still runs. Empty before API 33, where notifications need no runtime grant.
-    private val notificationPermission: Array<String> =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            emptyArray()
-        }
+    // Best-effort extras requested alongside the BLE permissions but never gating collection:
+    //  - POST_NOTIFICATIONS (API 33+): a denial only hides the foreground notice; the service runs.
+    //  - ACCESS_FINE_LOCATION: enables the optional GPS anchoring log; a denial just skips GPS.
+    // (On API < 31 fine location is already a *gating* BLE-scan permission in blePermissions.)
+    private val optionalPermissions: Array<String> = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
+        add(Manifest.permission.ACCESS_FINE_LOCATION)
+    }.toTypedArray()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,7 +72,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    launcher.launch(blePermissions + notificationPermission)
+                    launcher.launch(blePermissions + optionalPermissions)
                 }
 
                 NavHost(

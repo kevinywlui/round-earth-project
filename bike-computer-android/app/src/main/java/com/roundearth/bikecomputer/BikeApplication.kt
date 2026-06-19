@@ -3,7 +3,9 @@ package com.roundearth.bikecomputer
 import android.app.Application
 import com.roundearth.bikecomputer.data.BikeRepository
 import com.roundearth.bikecomputer.data.CscBleDataSource
+import com.roundearth.bikecomputer.data.HeadingLogger
 import com.roundearth.bikecomputer.data.HeadingProvider
+import com.roundearth.bikecomputer.data.LocationLogger
 import com.roundearth.bikecomputer.data.PreferencesStore
 import com.roundearth.bikecomputer.data.applyMountingOffset
 import com.roundearth.bikecomputer.data.db.BikeDatabase
@@ -34,6 +36,8 @@ class BikeApplication : Application() {
     /** True when the device actually has a heading sensor to calibrate against. */
     val hasHeadingSensor: Boolean get() = headingProvider.hasSensor
 
+    private val db: BikeDatabase by lazy { BikeDatabase.get(this) }
+
     /** The BLE source that talks to the CSC speed sensor. */
     val bleSource: CscBleDataSource by lazy {
         CscBleDataSource(
@@ -43,13 +47,33 @@ class BikeApplication : Application() {
             heading = { applyMountingOffset(headingProvider.degrees, headingOffsetDeg) },
             declination = { declinationDeg },
             pairedSensor = prefs.pairedSensor,
+            // Persist a drained per-minute backlog idempotently, stamping the circumference in effect
+            // now. repository is referenced lazily here, so it's initialized by the time a batch lands.
+            onBacklogBatch = { batch -> appScope.launch { repository.ingestBacklog(batch, circumferenceM) } },
         )
     }
 
     val repository: BikeRepository by lazy {
-        val db = BikeDatabase.get(this)
-        BikeRepository(bleSource, prefs, db.revolutionEventDao(), appScope)
+        BikeRepository(
+            bleSource, prefs,
+            db.revolutionEventDao(), db.backlogMinuteDao(), db.headingMinuteDao(), db.gpsFixDao(),
+            appScope,
+        )
     }
+
+    /** Per-minute compass timeline (phone-side; runs whenever collecting, independent of BLE). */
+    private val headingLogger: HeadingLogger by lazy {
+        HeadingLogger(
+            magneticHeading = { applyMountingOffset(headingProvider.degrees, headingOffsetDeg) },
+            declinationDeg = { declinationDeg },
+            compassAccuracy = { headingProvider.accuracy },
+            dao = db.headingMinuteDao(),
+            scope = appScope,
+        )
+    }
+
+    /** Optional GPS anchoring log (separate table + separate export; best-effort on FINE location). */
+    private val locationLogger: LocationLogger by lazy { LocationLogger(this, db.gpsFixDao(), appScope) }
 
     override fun onCreate() {
         super.onCreate()
@@ -76,6 +100,8 @@ class BikeApplication : Application() {
      */
     fun startCollection() {
         headingProvider.start()
+        headingLogger.start()   // per-minute compass timeline (phone-side, BLE-independent)
+        locationLogger.start()  // optional GPS anchoring log (no-op without FINE permission)
         repository.start()
     }
 
@@ -86,6 +112,8 @@ class BikeApplication : Application() {
      */
     fun stopCollection() {
         repository.onBackground()
+        locationLogger.stop()
+        headingLogger.stop()
         headingProvider.stop()
     }
 }

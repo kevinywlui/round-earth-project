@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.roundearth.bikecomputer.data.BikeData
@@ -40,6 +41,10 @@ class CollectionService : Service() {
     // Drives the live notification off the same data the dashboard reads. Cancelled in onDestroy.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    // Held while collecting so the once-a-minute heading sampler (and any timer work) keeps firing
+    // with the screen off — a plain coroutine timer is frozen under Doze. Released in onDestroy.
+    private var wakeLock: PowerManager.WakeLock? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -65,6 +70,16 @@ class CollectionService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
         )
 
+        // Keep the CPU awake for the duration so the per-minute heading sampler isn't frozen by Doze
+        // with the screen off. Idempotent: a sticky restart won't stack locks (acquire only if null).
+        if (wakeLock == null) {
+            val pm = getSystemService(PowerManager::class.java)
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$WAKELOCK_TAG").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+
         // Collection + the magnetometer are owned by the service now, so both run for the whole
         // ride regardless of UI visibility. startCollection() is idempotent, so a sticky restart
         // re-enters here harmlessly and the session-resume window stitches the ride back together.
@@ -81,6 +96,8 @@ class CollectionService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
         // Stop the BLE source and the magnetometer; the recording job stays idle (not torn down)
         // so a later restart resumes the ride instead of re-seeding the odometer from zero.
         app.stopCollection()
@@ -131,6 +148,7 @@ class CollectionService : Service() {
     companion object {
         private const val CHANNEL_ID = "ride_collection"
         private const val NOTIF_ID = 1
+        private const val WAKELOCK_TAG = "bikecomputer:collection"
         const val ACTION_STOP = "com.roundearth.bikecomputer.action.STOP_COLLECTION"
     }
 }

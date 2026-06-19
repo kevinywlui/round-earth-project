@@ -1,5 +1,9 @@
 package com.roundearth.bikecomputer.data
 
+import com.roundearth.bikecomputer.data.db.BacklogMinute
+import com.roundearth.bikecomputer.data.db.BacklogMinuteDao
+import com.roundearth.bikecomputer.data.db.GpsFixDao
+import com.roundearth.bikecomputer.data.db.HeadingMinuteDao
 import com.roundearth.bikecomputer.data.db.RevolutionEvent
 import com.roundearth.bikecomputer.data.db.RevolutionEventDao
 import com.roundearth.bikecomputer.data.db.SessionSummary
@@ -21,6 +25,9 @@ class BikeRepository(
     private val source: BikeDataSource,
     private val prefs: PreferencesStore,
     private val dao: RevolutionEventDao,
+    private val backlogDao: BacklogMinuteDao,
+    private val headingDao: HeadingMinuteDao,
+    private val gpsDao: GpsFixDao,
     private val scope: CoroutineScope,
 ) {
     /**
@@ -86,6 +93,33 @@ class BikeRepository(
      */
     fun onBackground() = source.stop()
 
+    /**
+     * Idempotently persists a drained per-minute backlog batch, stamping each row with the current
+     * wheel circumference (per-row, never rewritten) and the wall-clock back-computed from the
+     * connect-time anchor. INSERT OR IGNORE on (sensorMac, recordIndex) makes a re-replay a no-op.
+     */
+    // Limitation: the stamped circumference is the CURRENT setting, applied to revolutions that were
+    // logged in the past. If the wheel circumference was changed during a disconnected window, that
+    // window's recovered distance uses the current value (the sensor stores only revolutions, not
+    // circumference, so the historical value is unrecoverable). Acceptable — circumference changes are
+    // rare and a disconnected window rarely spans one — but it is a real approximation for those rows.
+    suspend fun ingestBacklog(batch: BacklogBatch, circumferenceMeters: Double) {
+        if (batch.records.isEmpty()) return
+        backlogDao.insertAll(
+            batch.records.map { rec ->
+                BacklogMinute(
+                    sensorMac = batch.sensorMac,
+                    bootId = rec.bootId,
+                    recordIndex = rec.recordIndex,
+                    uptimeSeconds = rec.uptimeSeconds,
+                    cumulativeRevolutions = rec.cumulativeRevolutions,
+                    wallClockMillis = BacklogRecordParser.wallClockMillis(rec, batch.info, batch.anchorWallClockMs),
+                    wheelCircumferenceM = circumferenceMeters,
+                )
+            }
+        )
+    }
+
     /** A recent prior session is resumed; otherwise a new one begins now. */
     private suspend fun resolveSessionId(): Long {
         val now = System.currentTimeMillis()
@@ -124,13 +158,76 @@ class BikeRepository(
         }
     }
 
-    suspend fun clearHistory() = dao.deleteAll()
+    /**
+     * The per-minute 2-D DISPLACEMENT timeline: each minute's recovered distance and its north/east
+     * components (blank when the heading for that minute was unknown — never 0). Built from the
+     * backlog (revolutions) joined with the per-minute heading via [DisplacementReconstructor]. This
+     * is the export that directly answers "displacement N–S and E–W."
+     *
+     * Note: this loads the backlog + heading tables into memory (the per-boot reconstruction needs
+     * grouping, so it isn't trivially streamable). Per-minute rows are far smaller than the per-rev
+     * table, but for a very long history this is the one unbounded export; clear history if needed.
+     */
+    suspend fun exportDisplacementCsvTo(out: Appendable) {
+        out.append(DISPLACEMENT_CSV_HEADER)
+        val backlog = backlogDao.all()
+        val headings = headingDao.all().associateBy { it.minuteEpoch }
+        val (perMinute, _) = DisplacementReconstructor.reconstruct(backlog) { headings[it]?.trueHeadingDegrees }
+        for (m in perMinute) {
+            val h = headings[m.minuteEpoch]
+            out.append(m.minuteEpoch.toString()).append(',')
+            out.append((m.minuteEpoch * 60_000L).toString()).append(',')
+            out.append(m.distanceMeters.toString()).append(',')
+            out.append(m.northMeters?.toString() ?: "").append(',')   // blank = direction unknown
+            out.append(m.eastMeters?.toString() ?: "").append(',')
+            out.append(h?.trueHeadingDegrees?.toString() ?: "").append(',')
+            out.append((h?.sampleCount ?: 0).toString()).append(',')
+            out.append((h?.compassAccuracy ?: -1).toString()).append('\n')
+        }
+    }
+
+    /**
+     * Streams the GPS fixes as CSV — a SEPARATE export/download from the ride telemetry, because raw
+     * coordinates are sensitive and the dead-reckoning model never depends on them.
+     */
+    suspend fun exportGpsCsvTo(out: Appendable) {
+        out.append(GPS_CSV_HEADER)
+        var afterId = 0L
+        while (true) {
+            val page = gpsDao.getPageAfter(afterId, EXPORT_PAGE_SIZE)
+            if (page.isEmpty()) break
+            for (f in page) {
+                out.append(f.id.toString()).append(',')
+                out.append(f.timestampMillis.toString()).append(',')
+                out.append(f.latitude.toString()).append(',')
+                out.append(f.longitude.toString()).append(',')
+                out.append(f.accuracyMeters?.toString() ?: "").append(',')
+                out.append(f.altitudeMeters?.toString() ?: "").append(',')
+                out.append(f.bearingDegrees?.toString() ?: "").append(',')
+                out.append(f.speedMps?.toString() ?: "").append('\n')
+                afterId = f.id
+            }
+        }
+    }
+
+    /** Clears all recorded data — the per-revolution rows AND the per-minute timelines and GPS fixes. */
+    suspend fun clearHistory() {
+        dao.deleteAll()
+        backlogDao.deleteAll()
+        headingDao.deleteAll()
+        gpsDao.deleteAll()
+    }
 
     companion object {
         private const val CSV_HEADER =
             "session_id,timestamp_ms,cumulative_revolutions,delta_revolutions," +
                 "sensor_event_time_1024,cumulative_event_time_1024,wheel_circumference_m," +
                 "heading_degrees,true_heading_degrees\n"
+        private const val DISPLACEMENT_CSV_HEADER =
+            "minute_epoch,timestamp_ms,distance_m,north_m,east_m,true_heading_degrees," +
+                "heading_sample_count,compass_accuracy\n"
+        private const val GPS_CSV_HEADER =
+            "id,timestamp_ms,latitude,longitude,accuracy_m,altitude_m,bearing_degrees,speed_mps\n"
         private const val EXPORT_PAGE_SIZE = 1_000
         // Resume the prior ride if the app restarts within this window of the last event.
         private const val SESSION_RESUME_WINDOW_MS = 30 * 60 * 1000L

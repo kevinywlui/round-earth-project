@@ -119,12 +119,28 @@ class SettingsViewModel(
      * destination doesn't block the UI) and the stream is always closed. [onError] surfaces a
      * failure so the UI reports it instead of claiming a successful save.
      */
-    fun saveCsv(open: () -> OutputStream?, onDone: () -> Unit, onError: (Throwable) -> Unit = {}) {
+    fun saveCsv(open: () -> OutputStream?, onDone: () -> Unit, onError: (Throwable) -> Unit = {}) =
+        streamSave(open, onDone, onError) { repository.exportCsvTo(it) }
+
+    /** The per-minute 2-D displacement timeline (distance + north/east per minute). */
+    fun saveDisplacementCsv(open: () -> OutputStream?, onDone: () -> Unit, onError: (Throwable) -> Unit = {}) =
+        streamSave(open, onDone, onError) { repository.exportDisplacementCsvTo(it) }
+
+    /** The GPS fixes — a SEPARATE download from the ride telemetry (raw coordinates are sensitive). */
+    fun saveGpsCsv(open: () -> OutputStream?, onDone: () -> Unit, onError: (Throwable) -> Unit = {}) =
+        streamSave(open, onDone, onError) { repository.exportGpsCsvTo(it) }
+
+    private fun streamSave(
+        open: () -> OutputStream?,
+        onDone: () -> Unit,
+        onError: (Throwable) -> Unit,
+        exporter: suspend (Appendable) -> Unit,
+    ) {
         viewModelScope.launch {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     val out = open() ?: error("Could not open the destination file")
-                    out.bufferedWriter().use { writer -> repository.exportCsvTo(writer) }
+                    out.bufferedWriter().use { writer -> exporter(writer) }
                 }
             }
             result.fold(onSuccess = { onDone() }, onFailure = onError)

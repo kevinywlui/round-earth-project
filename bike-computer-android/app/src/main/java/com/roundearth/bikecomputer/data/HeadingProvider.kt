@@ -33,6 +33,16 @@ class HeadingProvider(context: Context) : SensorEventListener {
     var degrees: Float = Float.NaN
         private set
 
+    /**
+     * Latest compass accuracy (SensorManager.SENSOR_STATUS_ACCURACY_HIGH/MEDIUM/LOW, _UNRELIABLE, or
+     * _NO_CONTACT; -1 until the first report). A constant magnetometer bias is the dominant error in
+     * 2-D dead-reckoning and is otherwise invisible, so it is surfaced for the per-minute heading log
+     * to record. Larger = better (HIGH=3 … UNRELIABLE=0, NO_CONTACT=-1).
+     */
+    @Volatile
+    var accuracy: Int = -1
+        private set
+
     private val rotationMatrix = FloatArray(9)
     private val remapped = FloatArray(9)
     private val orientation = FloatArray(3)
@@ -65,5 +75,7 @@ class HeadingProvider(context: Context) : SensorEventListener {
         degrees = ((Math.toDegrees(azimuthRad.toDouble()).toFloat()) + 360f) % 360f
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        if (sensor?.type == Sensor.TYPE_ROTATION_VECTOR) this.accuracy = accuracy
+    }
 }

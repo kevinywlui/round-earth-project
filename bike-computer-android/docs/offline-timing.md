@@ -65,3 +65,47 @@ copy a CSV consumer will actually find.
   sub-second wall-clock jitter exactly at the boundary, so in practice the
   "exact while moving" guarantee holds — but a single anomalous delta right at a
   ~64 s gap is the one place to distrust.
+
+## The backlog timeline: a separate, estimated clock
+
+The per-minute **backlog** (revolutions the sensor logged while the app was
+disconnected, recovered from its on-device flash on reconnect — see
+[ARCHITECTURE.md](../../ARCHITECTURE.md) → *Per-minute robustness* and
+[`backlog-and-displacement.md`](backlog-and-displacement.md)) carries its *own*
+wall-clock, on entirely different terms from the per-revolution series above.
+Treat it as a distinct clock with its own contract:
+
+1. **The backlog wall-clock is ESTIMATED — never mix it with
+   `cumulative_event_time_1024`.** Each `backlog_minutes` row's
+   `wallClockMillis` is *back-computed*, not measured: on connect the app reads
+   the Backlog **Info** block (`boot_id` + the sensor's current uptime) and pairs
+   it with `System.currentTimeMillis()` at that instant — a single
+   **uptime → wall-clock anchor**. A record's time is then
+   `anchorWallClock − (anchorUptime − record.uptime_s)`. The two series are
+   unrelated clocks at different resolutions (per-minute vs 1/1024 s); a consumer
+   must **not** subtract one from the other or stitch them into one timeline.
+
+2. **The anchor is precise for the *current* boot, a lower bound for prior
+   boots.** The sensor has **no RTC**, so it can place a record only relative to a
+   boot it is still inside. For records whose `boot_id` matches the Info block's,
+   the offset is exact (same uptime origin). For records from a *prior* boot (the
+   sensor rebooted while disconnected), the off-duration between boots is
+   *unknowable*, so those rows are pinned at the current boot's start — an
+   **estimate / lower bound**, not a measurement. Don't read prior-boot minute
+   timestamps as exact.
+
+3. **Distance keys on revolutions, so it is clock-independent.** The recovered
+   *distance* never depends on any of the above timing: it is the span of
+   `cumulativeRevolutions` **within one `boot_id`** × circumference (a reboot
+   resets the counter, so deltas are never taken across a boot boundary). Even
+   when the wall-clock for a window is a rough estimate, its distance — and hence
+   its contribution to the displacement vector — is sound.
+
+4. **The keys are `(sensorMac, boot_id, record_index)`.** `record_index` is the
+   sensor's global, reboot-surviving write counter, so `(sensorMac, record_index)`
+   is unique forever and the app dedups on it with `INSERT OR IGNORE` (every
+   reconnect re-streams the whole ring; the dedup makes that a no-op). `boot_id`
+   distinguishes the cumulative-counter resets a reboot causes — it is the group
+   key for the within-boot delta, not an idempotency key on its own (a sub-stable
+   boot can reuse a `boot_id`, which is exactly why `record_index` carries the
+   uniqueness).
