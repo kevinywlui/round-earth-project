@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /** A CSC sensor seen during scanning, surfaced to the picker UI. */
@@ -106,8 +107,11 @@ class CscBleDataSource(
     // Bounded retry after a scan failure. onScanFailed used to go silent, which (with start()'s
     // wantRunning idempotency guard) left scanning dead for the whole process unless the user
     // toggled Bluetooth. scanFailures drives an escalating backoff; both reset on a clean scan start.
+    // scanFailures is an AtomicInteger because it is written from the ScanCallback binder thread
+    // (onScanFailed) and the service/main thread (startScan/stop/onAdapterOff); a clean-start reset
+    // must be visible to the retry path.
     private var scanRetryJob: Job? = null
-    private var scanFailures = 0
+    private val scanFailures = AtomicInteger(0)
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -220,7 +224,7 @@ class CscBleDataSource(
         headingJob?.cancel(); headingJob = null
         pairedJob?.cancel(); pairedJob = null
         scanRetryJob?.cancel(); scanRetryJob = null
-        scanFailures = 0
+        scanFailures.set(0)
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
@@ -277,7 +281,7 @@ class CscBleDataSource(
         // The adapter is down; STATE_ON revives scanning fresh, so drop any pending retry and its
         // backoff rather than firing startScan() against an invalid scanner during the off window.
         scanRetryJob?.cancel(); scanRetryJob = null
-        scanFailures = 0
+        scanFailures.set(0)
         disconnectAndClose(connection.getAndSet(null)?.gatt)
         reconnect.clear()
         seen.keys.forEach { addr -> seen.computeIfPresent(addr) { _, s -> s.copy(connected = false) } }
@@ -303,7 +307,7 @@ class CscBleDataSource(
         }
         scanning = true
         // A clean start clears any scan-failure backoff and pending retry.
-        scanFailures = 0
+        scanFailures.set(0)
         scanRetryJob?.cancel(); scanRetryJob = null
         updateConnectionState()
         Diag.i(TAG, "scanning for CSC sensors")
@@ -325,7 +329,7 @@ class CscBleDataSource(
     private fun scheduleScanRetry() {
         if (!wantRunning) return
         scanRetryJob?.cancel()
-        val attempt = ++scanFailures
+        val attempt = scanFailures.incrementAndGet()
         val delayMs = (BASE_SCAN_RETRY_MS shl (attempt - 1).coerceAtMost(MAX_SCAN_RETRY_SHIFT))
             .coerceAtMost(MAX_SCAN_RETRY_MS)
         Diag.w(TAG, "scan retry #$attempt in ${delayMs}ms")

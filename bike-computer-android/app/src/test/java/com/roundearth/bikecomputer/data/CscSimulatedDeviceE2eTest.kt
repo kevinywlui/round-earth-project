@@ -153,18 +153,25 @@ class CscSimulatedDeviceE2eTest {
      */
     @Test
     fun scanFailure_reschedulesScanInsteadOfWedging() = runBlocking {
-        BluetoothAdapter.getDefaultAdapter().enable() // Robolectric adapter ON so start() scans
-        source.start()
-        assertEquals(ConnectionState.SCANNING, source.connectionState.value)
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        val wasEnabled = adapter.isEnabled
+        adapter.enable() // Robolectric adapter ON so start() scans
+        try {
+            source.start()
+            assertEquals(ConnectionState.SCANNING, source.connectionState.value)
 
-        // The system scanner reports a failure (2 = SCAN_FAILED_APPLICATION_REGISTRATION_FAILED).
-        source.onScanFailedForTest(2)
-        assertEquals(ConnectionState.DISCONNECTED, source.connectionState.value)
+            // The system scanner reports a failure (2 = SCAN_FAILED_APPLICATION_REGISTRATION_FAILED).
+            source.onScanFailedForTest(2)
+            assertEquals(ConnectionState.DISCONNECTED, source.connectionState.value)
 
-        // The bounded retry re-issues startScan within ~BASE_SCAN_RETRY_MS — no BT toggle, no
-        // collection restart. On the old code this never happened and the timeout would fire.
-        withTimeout(5_000) { while (source.connectionState.value != ConnectionState.SCANNING) delay(20) }
-        assertEquals(ConnectionState.SCANNING, source.connectionState.value)
+            // The bounded retry re-issues startScan within ~BASE_SCAN_RETRY_MS — no BT toggle, no
+            // collection restart. On the old code this never happened and the timeout would fire.
+            withTimeout(5_000) { while (source.connectionState.value != ConnectionState.SCANNING) delay(20) }
+            assertEquals(ConnectionState.SCANNING, source.connectionState.value)
+        } finally {
+            // Don't leak the global Robolectric adapter state into the rest of the suite.
+            if (!wasEnabled) adapter.disable()
+        }
     }
 
     /**
