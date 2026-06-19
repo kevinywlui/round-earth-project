@@ -1,6 +1,7 @@
 package com.roundearth.bikecomputer
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -34,6 +36,16 @@ class MainActivity : ComponentActivity() {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
 
+    // Notification permission is best-effort and requested alongside the BLE ones (below) but never
+    // gates collection: on Android 13+ a denied grant only hides the foreground notice, the service
+    // still runs. Empty before API 33, where notifications need no runtime grant.
+    private val notificationPermission: Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            emptyArray()
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -47,16 +59,21 @@ class MainActivity : ComponentActivity() {
                     viewModel(factory = SensorViewModel.Factory(app.bleSource, app.prefs))
                 val nav = rememberNavController()
 
-                // Request BLE permissions, then start scanning/recording — but only
-                // start the BLE source once every required permission is granted.
+                // Request BLE (+ notification) permissions, then start the foreground collection
+                // service — but only once the *BLE* permissions are granted. The notification grant
+                // is best-effort and intentionally not part of the gate: the service runs without it.
                 val launcher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestMultiplePermissions()
                 ) { grants ->
-                    if (grants.values.all { it }) app.repository.start()
+                    if (blePermissions.all { grants[it] == true }) {
+                        ContextCompat.startForegroundService(
+                            app, Intent(app, CollectionService::class.java)
+                        )
+                    }
                 }
 
                 LaunchedEffect(Unit) {
-                    launcher.launch(blePermissions)
+                    launcher.launch(blePermissions + notificationPermission)
                 }
 
                 NavHost(

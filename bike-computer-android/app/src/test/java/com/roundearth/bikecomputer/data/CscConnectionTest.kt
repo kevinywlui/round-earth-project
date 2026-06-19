@@ -267,10 +267,11 @@ class CscConnectionTest {
     }
 
     /**
-     * Backgrounding (ProcessLifecycle onStop → repository.onBackground() → source.stop()) must
-     * disconnect() the radio link BEFORE close(). A bare close() only releases the local GATT
+     * Ending collection (CollectionService.onDestroy → app.stopCollection() →
+     * repository.onBackground() → source.stop()) must disconnect() the radio link BEFORE close().
+     * A bare close() only releases the local GATT
      * client handle and leaves the sensor's ACL up (firmware reports conn=1, disc=0) until its
-     * supervision timeout fires (status=8); the next foreground then layers a duplicate client
+     * supervision timeout fires (status=8); the next collection start then layers a duplicate client
      * over that still-live link. Asserting the disconnect-before-close ordering pins the fix.
      */
     @Test

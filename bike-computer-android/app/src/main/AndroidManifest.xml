@@ -17,6 +17,14 @@
          Independent of BLE scanning, which is flagged neverForLocation above. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- Foreground service keeps collection alive while the app is backgrounded / the screen is
+         off, for hours-long rides. The connectedDevice type (Android 14+ requires a declared type)
+         is backed by the BLUETOOTH_CONNECT grant above. POST_NOTIFICATIONS (Android 13+) is for the
+         ongoing notice; if denied the service still runs, just without a visible notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
@@ -36,6 +44,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".CollectionService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

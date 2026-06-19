@@ -119,13 +119,52 @@ reconnects fast), recovers from a Bluetooth adapter toggle, and only reports
 `CONNECTED` after the notification subscription is confirmed — never on a bare GATT
 link. The reconnect math is unit-tested in `ReconnectPolicyTest`.
 
-Every *app-initiated* teardown (backgrounding, adapter-off, switching sensors, losing
-the connect race) calls `disconnect()` **before** `close()`. `BluetoothGatt.close()`
+Every *app-initiated* teardown (ending collection — the notification's **Stop** action or
+the service being killed — adapter-off, switching sensors, losing the connect race) calls
+`disconnect()` **before** `close()`. `BluetoothGatt.close()`
 only releases the local client handle — it does not drop the ACL link — so a bare close
 strands the sensor connected to nobody (the firmware keeps `conn=1`) until its supervision
-timeout fires as a `status=8`, and the next foreground layers a duplicate link over the
+timeout fires as a `status=8`, and the next collection start layers a duplicate link over the
 stale one. The unsolicited-drop callback is the one exception: it runs after the link is
 already down, so it closes directly. This ordering is pinned by `stop_disconnectsRadioLinkBeforeClosing`.
+Note that *backgrounding is no longer a teardown trigger* — collection is owned by a
+foreground service (see below), so pocketing the phone or locking the screen keeps the link up.
+
+## Collection outlives the UI: a foreground service
+
+A ride lasts hours; the screen does not. Collection therefore cannot be tied to UI
+visibility, so it lives in a **foreground service** (`CollectionService`,
+`connectedDevice` type) rather than the Activity or the process foreground. The service is
+the seam for one specific reason: a backgrounded *app* is scan-throttled and its BLE
+callbacks are starved or killed the moment it loses the foreground, but a backgrounded
+*service* showing an ongoing notification is kept alive by the OS and is exempt from that
+throttling — which is exactly the difference between "records while you glance at it" and
+"records the whole ride with the phone in a pocket." `connectedDevice` is the foreground-
+service type for a BLE peripheral (Android 14+ rejects `startForeground` without a declared
+type) and is backed by the `BLUETOOTH_CONNECT` grant the app already holds; the service
+promotes itself to foreground *before* touching the radio.
+
+Ownership, not mechanism, is what moved. `BikeApplication` still hosts the collection
+pipeline (`BikeRepository` + `CscBleDataSource` + Room) and the magnetometer; the service
+merely drives their start/stop — `startCollection()` on the first start command,
+`stopCollection()` in `onDestroy` — so the "smart collector / dumb sensor" split is
+untouched and this is purely an app-side change. `MainActivity` no longer starts the
+repository directly: once the BLE permissions are granted it `startForegroundService`s
+`CollectionService`. The service is `START_STICKY` and `startCollection()` is idempotent
+(`BikeRepository.start` no-ops a second recording job, `HeadingProvider.start` re-registers
+the same listener harmlessly), so an OS kill-and-restart under memory pressure re-enters
+cleanly and the session-resume window stitches the ride back together instead of zeroing the
+odometer. `POST_NOTIFICATIONS` is requested best-effort and deliberately does **not** gate
+collection: a denied grant only hides the ongoing notice, the service still runs.
+
+**The magnetometer runs for the entire ride — including backgrounded — on purpose.** It is
+no longer gated on UI visibility, because a revolution recorded with the screen off must
+still carry a *real* heading. This is the same invariant as "unknown heading is `NaN`/`NULL`,
+never `0`" seen from the other side: were the compass torn down when the app backgrounded,
+every background revolution would record an unknown heading (`NULL`), silently puncturing the
+`Σ Δrev · circ · cos θ` northward reconstruction for the bulk of a real ride. Keeping the
+sensor running is the small, continuous power cost that keeps per-revolution headings
+non-`NULL` end to end.
 
 ## Deliberate non-goals
 
