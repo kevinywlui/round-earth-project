@@ -26,6 +26,7 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.argumentCaptor
 import org.mockito.kotlin.eq
+import org.mockito.kotlin.inOrder
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
@@ -263,6 +264,30 @@ class CscConnectionTest {
         // deltaRevolutions==0 is what the DAO's SUM(deltaRevolutions) distance math keys on, so a
         // 0-delta baseline packet contributes no phantom distance.
         assertEquals("a +50 jump across a reconnect must not count as 50 revolutions", 0L, post.deltaRevolutions)
+    }
+
+    /**
+     * Backgrounding (ProcessLifecycle onStop → repository.onBackground() → source.stop()) must
+     * disconnect() the radio link BEFORE close(). A bare close() only releases the local GATT
+     * client handle and leaves the sensor's ACL up (firmware reports conn=1, disc=0) until its
+     * supervision timeout fires (status=8); the next foreground then layers a duplicate client
+     * over that still-live link. Asserting the disconnect-before-close ordering pins the fix.
+     */
+    @Test
+    fun stop_disconnectsRadioLinkBeforeClosing() {
+        val cb = connect()
+        subscribe(cb)
+        assertEquals(ConnectionState.CONNECTED, source.connectionState.value)
+
+        source.stop()
+
+        // disconnect() asks the stack to drop the ACL; close() then frees the client. Order matters:
+        // close()-first (the bug) strands the peer connected. inOrder also proves disconnect() ran.
+        inOrder(gatt) {
+            verify(gatt).disconnect()
+            verify(gatt).close()
+        }
+        assertNull("stop() must free the connection slot", source.connectionCallbackForTest())
     }
 
     // --- helpers ---
