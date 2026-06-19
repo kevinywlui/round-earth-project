@@ -66,6 +66,22 @@ A standard **Device Information Service** (`0x180A`) is also exposed, with three
 
 No **Battery Service** (`0x180F`) is provided on purpose: the sensor runs off a USB power bank whose charge the ESP32 cannot measure.
 
+### Backlog service (custom — recovers revolutions ridden while disconnected)
+
+> **Status:** review- and compile-validated only — **not yet hardware-tested**. The NVS-commit latency under BLE load, the IRAM-safety of a wheel edge landing during a flash write, and the ring sizing against the stock 20 KB `nvs` partition are all flagged in `speed.ino` as hardware-validation items.
+
+The live CSC stream only delivers revolutions while a client is *connected*. To let the companion app recover what it missed while disconnected — including across a sensor reboot or power loss — the firmware keeps a small **per-minute revolution backlog** in flash and exposes it over a custom, **un-advertised** GATT service (only CSC is advertised, so a generic head unit never sees it and interop is unaffected).
+
+Every minute, *if the cumulative count advanced*, the firmware appends a 16-byte record `(boot_id, record_index, uptime_s, cumulative_revs)` to a 180-slot ring (~3 h of riding-minutes; idle minutes are skipped). The ring lives in RAM and is persisted as **one NVS blob**, so it survives a full power loss and fits the stock 20 KB `nvs` partition. `boot_id` is an NVS-persisted monotonic counter whose *next* value is committed only after ~5 s of stable uptime (so a brownout / power-bank reboot loop can't burn NVS wear), and `record_index` is the global, reboot-surviving write counter, so `record_index` is unique forever and the app can dedup re-streamed records.
+
+| | |
+|---|---|
+| **Service UUID** | `5245424C-…` — custom, un-advertised (discovered by service discovery, not advertising) |
+| **Info characteristic** | `52454201-…` — READ; 20-byte block: `boot_id`, current uptime (the app's clock anchor), the ring's index range, and an overflow count |
+| **Data characteristic** | `52454202-…` — NOTIFY; on subscribe, streams the ring as 16-byte records oldest-first, then a `record_index == 0xFFFFFFFF` terminator |
+
+The app **pulls** by subscribing (no app→device writes) and back-computes each record's wall-clock from the Info-block anchor; because every reconnect re-streams the whole ring, ingestion is made idempotent app-side. See [`bike-computer-android/docs/backlog-and-displacement.md`](../bike-computer-android/docs/backlog-and-displacement.md) for the full consumer contract. Two related hardening changes ride along: the wheel ISR now uses the IRAM-resident `esp_timer_get_time()` instead of flash-resident `millis()` (so an edge can fire safely during a backlog flash write), and `attachInterrupt` runs *before* the boot wiring self-test so revolutions during the boot window are counted rather than dropped by a unit that reboots mid-ride.
+
 ## Configuration
 
 All configuration is at the top of `speed/speed.ino`:
@@ -99,15 +115,20 @@ advertising as: Bike Speed 3F9A
 [alive] up=1s conn=0 heap=213120   # 1 Hz heartbeat for the first 5 s (see "Power / boot diagnostics")
 [event] client connected
 [rev] revs=1 t=1043   # only with DEBUG_VERBOSE=1; omitted at the field default (0)
-[health] up=5s revs=12 rate=2.4/s drops=0 hwm=2/31 notif=12 conn=1 disc=0 heap=212044
+[health] up=5s revs=12 rate=2.4/s drops=0 drej=0 hwm=2/31 notif=12 conn=1 disc=0 boot=1 log=0 ovf=0 nvserr=0 heap=212044
 ```
 
 Health fields: `up` uptime (s), `revs` cumulative revolutions, `rate` revolutions/s over
-the last interval, `drops` ring-buffer overflows, `hwm` peak *observed* ring-buffer
+the last interval, `drops` ring-buffer overflows, `drej` edges rejected by the `MIN_MS`
+debounce (instrumentation: a persistently rising `drej` on a fast wheel would reveal real
+revolutions being undercounted as contact bounce), `hwm` peak *observed* ring-buffer
 occupancy vs. capacity (an upper bound — the ISR samples occupancy against a tail the
 consumer may have already advanced, so it can only over-report how close you got to the
 cliff, never under-report), `notif` CSC packets sent, `conn` link state, `disc`
-disconnects since boot, `heap` free bytes.
+disconnects since boot, `boot` the current backlog `boot_id`, `log` the backlog write
+counter (next `record_index`), `ovf` backlog records overwritten before the app drained
+them, `nvserr` failed backlog NVS writes (a non-zero value means the persisted cursor may
+lag — a data-loss risk, surfaced rather than hidden), `heap` free bytes.
 
 **On `drops`:** distance and the cumulative count are always correct (the ISR increments
 `wheelRevolutions` before enqueuing, so an overflow only loses a *timestamp*, not a count).
@@ -152,10 +173,13 @@ what the `power-on` + "RTC RAM cleared" combination confirms.
 
 ## Wiring self-test
 
-At power-on the firmware runs a quick wiring self-test before it starts counting revolutions.
-During an `SELFTEST_WINDOW_MS` window (8 s by default) the LED **winks rapidly** — pass the
-magnet by the sensor once during this window and, if the sensor responds, the LED **flashes
-three times** to confirm the wiring.
+At power-on the firmware runs a quick wiring self-test. (The wheel ISR is now armed *before*
+this self-test — not after — so revolutions ridden during the up-to-8 s boot window are
+counted instead of silently dropped by a unit that reboots mid-ride; the self-test polls the
+pin directly, so its only side effect is that the confirming magnet wave may register a rev or
+two.) During an `SELFTEST_WINDOW_MS` window (8 s by default) the LED **winks rapidly** — pass
+the magnet by the sensor once during this window and, if the sensor responds, the LED
+**flashes three times** to confirm the wiring.
 
 Why a magnet pass is the test: the A3144 is open-collector and active low, so an idle
 (untriggered) sensor and a *disconnected* `OUT` pin both read HIGH through the MCU's pull-up —

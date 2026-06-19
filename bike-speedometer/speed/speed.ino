@@ -5,6 +5,8 @@
 #include <esp_system.h>    // esp_reset_reason() for boot diagnostics
 #include <esp_task_wdt.h>  // task watchdog (requires ESP32 Arduino core 3.x / IDF 5)
 #include <esp_attr.h>      // RTC_NOINIT_ATTR — retained-RAM marker for the power-loss boot diagnostic
+#include <esp_timer.h>     // esp_timer_get_time() — IRAM-resident clock, safe to call from the ISR
+#include <Preferences.h>   // NVS-backed key/value store for the per-minute backlog ring (survives power loss)
 #include <stdarg.h>        // va_list/vsnprintf for the emitLogf() variadic debug logger
 
 // --- Configuration ---
@@ -34,6 +36,29 @@
 // BLE airtime stays bounded — per-revolution logs remain on USB serial. See emitLogf()/bleLog().
 #define NUS_SERVICE_UUID      "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NUS_TX_UUID           "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+// Backlog service (custom, NOT a SIG profile) — lets the app recover wheel revolutions that
+// happened while it was disconnected, including across a sensor reboot/power-loss. Every minute
+// the firmware appends (boot_id, record_index, uptime_s, cumulative_revs) to an NVS ring in flash
+// (so it survives power removal); on connect the app reads the Info characteristic (boot_id +
+// current uptime = its clock anchor + the ring's index range) and subscribes to the Data
+// characteristic, which streams the whole ring as 16-byte records then a terminator. Un-advertised
+// (only CSC is advertised), so a generic CSC head unit never sees it — graceful interop. No
+// app→device writes: the app pulls by subscribing, exactly like the NUS boot-summary replay.
+// NOTE: review+compile validated only, NOT yet hardware-tested — see the per-function caveats.
+#define BACKLOG_SERVICE_UUID  "5245424C-0000-1000-8000-00805f9b34fb"  // "REBL" in the first bytes
+#define BACKLOG_INFO_UUID     "52454201-0000-1000-8000-00805f9b34fb"  // READ:   20-byte info block
+#define BACKLOG_DATA_UUID     "52454202-0000-1000-8000-00805f9b34fb"  // NOTIFY: 16-byte records + terminator
+
+#define LOG_INTERVAL_MS    60000   // one backlog record per minute (per-minute resolution is enough)
+#define LOG_RING_SIZE      180     // bounded ring: ~3 h of riding-minutes (only minutes that advanced
+                                   // the count are written). On overflow the oldest record is
+                                   // overwritten and backlogOverflow is incremented so the loss is
+                                   // observable (surfaced in the Info block + health line), never silent.
+#define LOG_BOOTID_STABLE_S 5      // commit the next boot_id only after the unit survives this long,
+                                   // so a brownout/power-bank reboot loop doesn't burn NVS wear (or
+                                   // churn boot_ids) on a supply that's already failing.
+#define LOG_RECORD_BYTES   16      // (u32 boot_id, u32 record_index, u32 uptime_s, u32 cumulative_revs)
 
 BLECharacteristic *measurementChar;
 BLECharacteristic *logChar = nullptr;        // NUS TX (debug log notifications), null until setup()
@@ -84,6 +109,29 @@ volatile uint8_t  rbHighWater = 0;        // peak ring-buffer occupancy seen (ho
 volatile bool     deviceConnected = false;
 volatile uint32_t disconnectCount = 0;    // BLE drops since boot
 uint32_t          notificationsSent = 0;  // CSC packets sent (loop-only, no sync needed)
+volatile uint32_t debouncedRejects = 0;   // edges rejected by the MIN_MS debounce — instrumentation so
+                                          // the health line reveals if a genuinely fast wheel is ever
+                                          // being undercounted (vs. real contact bounce).
+
+// --- Per-minute backlog ring (NVS-backed; see BACKLOG_SERVICE_UUID) ---
+Preferences   backlogPrefs;               // NVS namespace "backlog"; holds boot_id + the ring slots
+BLECharacteristic *backlogInfoChar = nullptr;  // READ: 20-byte info block (boot_id, uptime, range, overflow)
+BLECharacteristic *backlogDataChar = nullptr;  // NOTIFY: streams 16-byte records on subscribe
+BLE2902 *backlogDataCccd = nullptr;       // Data char CCCD; polled to edge-detect a subscriber (like NUS)
+uint32_t backlogBootId   = 0;             // this power-on's id (NVS monotonic; survives full power loss)
+bool     backlogBootIdCommitted = false;  // true once the NEXT boot_id has been persisted (after stable uptime)
+uint32_t backlogHead     = 0;             // total records ever written = next record_index. Persisted in
+                                          // NVS so it is GLOBALLY monotonic across reboots; slot = head %
+                                          // LOG_RING_SIZE. (mac, record_index) is therefore unique even if
+                                          // a sub-stable boot reuses a boot_id — boot_id is kept only to
+                                          // detect the cumulative_revs reset a reboot causes.
+uint32_t backlogOverflow = 0;             // records overwritten before the app drained them (observability)
+uint32_t backlogNvsErr   = 0;             // failed NVS writes — a non-zero value means the persisted
+                                          // cursor may lag (data-loss risk); surfaced on the health line
+uint32_t lastLoggedRevs  = 0;             // cumulative_revs of the last record — only log when it advances
+// The ring lives in RAM and is persisted as ONE NVS blob (not per-slot keys): far less NVS entry/GC
+// churn, it fits the stock 20 KB `nvs` partition, and replay streams from RAM with no flash reads.
+uint8_t  backlogRing[LOG_RING_SIZE * LOG_RECORD_BYTES];
 
 // True when a client is connected AND has enabled notifications on the NUS TX CCCD. We poll
 // the descriptor's value (which the BLE stack updates on the client's CCCD write) rather than
@@ -140,11 +188,22 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
+// Refreshes the backlog Info block on every READ so the app's clock anchor (current uptime) and the
+// ring's index range are current at the moment it reads, not stale from boot.
+class BacklogInfoCallbacks : public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic *c) override { backlogFillInfo(); }
+};
+
 // Wheel detection runs off a falling-edge interrupt (A3144 pulls LOW on detect),
 // so a fast wheel can't slip between poll samples. BLE work can't happen in an ISR,
 // so we record the event in the ring buffer and let loop() send the notification.
 void IRAM_ATTR onMagnet() {
-  unsigned long now = millis();
+  // millis() lives in flash and is therefore UNSAFE to call from an IRAM ISR while a flash write
+  // is in progress (the per-minute backlog commit disables the cache, unmapping flash code — an
+  // edge landing then would fault on this single-core part). esp_timer_get_time() is IRAM-resident,
+  // so the ISR stays safe to fire during a backlog write. It returns microseconds since boot as a
+  // 64-bit value, which also sidesteps the 49.7-day millis() wrap. (HARDWARE-VALIDATION ITEM.)
+  unsigned long now = (unsigned long)(esp_timer_get_time() / 1000);  // ms since boot
   if (now - lastTrigger > MIN_MS) {
     lastTrigger = now;
     wheelRevolutions++;
@@ -167,6 +226,11 @@ void IRAM_ATTR onMagnet() {
       // this revolution's individual timestamp is lost. Count it for diagnostics.
       droppedRevolutions++;
     }
+  } else {
+    // Edge inside the debounce window. Usually contact bounce (correctly suppressed), but on a
+    // genuinely fast wheel it could be a real revolution being undercounted; count it so the
+    // health line can reveal that case instead of it being silent. Aligned 32-bit, no sync needed.
+    debouncedRejects++;
   }
 }
 
@@ -186,6 +250,93 @@ void notifyCSC(uint32_t revs, uint16_t eventTime) {
   measurementChar->setValue(data, 7);
   measurementChar->notify();
   notificationsSent++;
+}
+
+// Little-endian u32 store, matching the CSC packet packing and the app's readUInt32 decoder so the
+// app can reuse the same little-endian readers for backlog records.
+static inline void putLE32(uint8_t *p, uint32_t v) {
+  p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF;
+}
+
+// Opens the NVS-backed backlog store and loads the persisted cursor. boot_id is the value reserved
+// for THIS boot by the previous stable run (default 1 on a virgin device); it is NOT advanced here
+// — loop() commits boot_id+1 only after LOG_BOOTID_STABLE_S of uptime so a brownout loop can't burn
+// NVS wear. backlogHead is the global, reboot-surviving record counter. Empty ring slots are marked
+// by a 0 boot_id (boot_id is never 0 for a real record), so a virgin ring streams nothing.
+void backlogInit() {
+  backlogPrefs.begin("backlog", false);          // read/write namespace
+  backlogBootId = backlogPrefs.getUInt("bootId", 1);
+  backlogHead   = backlogPrefs.getUInt("head", 0);
+  memset(backlogRing, 0, sizeof(backlogRing));
+  backlogPrefs.getBytes("ring", backlogRing, sizeof(backlogRing));  // restore prior records (no-op if absent)
+  lastLoggedRevs = 0;
+  backlogOverflow = (backlogHead > LOG_RING_SIZE) ? (backlogHead - LOG_RING_SIZE) : 0;
+}
+
+// Appends one (boot_id, record_index, uptime_s, cumulative_revs) record to the NVS ring, flushed
+// immediately so a brownout can lose at most the in-progress minute (never an already-written one).
+// Called ONLY from loop() (never the ISR) and ONLY when the count advanced. The caller straddles
+// this with esp_task_wdt_reset() because an NVS page-compaction erase can take longer than usual.
+// HARDWARE-VALIDATION ITEM: NVS commit latency under BLE load, and ring sizing vs. the NVS partition.
+void backlogWrite(uint32_t revs, uint32_t uptimeS) {
+  uint32_t slot = backlogHead % LOG_RING_SIZE;
+  uint8_t *rec = backlogRing + slot * LOG_RECORD_BYTES;
+  putLE32(rec + 0,  backlogBootId);
+  putLE32(rec + 4,  backlogHead);                // record_index = global head (unique forever)
+  putLE32(rec + 8,  uptimeS);
+  putLE32(rec + 12, revs);
+
+  // Persist the whole ring, then the advanced cursor. Advance the persisted head ONLY if BOTH writes
+  // succeed: otherwise a full/failed NVS would let the RAM head outrun the stored head and, after a
+  // reboot, reuse a record_index for a different record — which the app silently dedups away (its key
+  // is (mac, record_index)). Counting failures surfaces that data-loss risk instead of hiding it.
+  bool ok = backlogPrefs.putBytes("ring", backlogRing, sizeof(backlogRing)) == sizeof(backlogRing) &&
+            backlogPrefs.putUInt("head", backlogHead + 1) == sizeof(uint32_t);
+  if (ok) {
+    backlogHead++;
+    backlogOverflow = (backlogHead > LOG_RING_SIZE) ? (backlogHead - LOG_RING_SIZE) : 0;
+    lastLoggedRevs = revs;
+  } else {
+    backlogNvsErr++;  // leave head unadvanced; next minute overwrites this slot, indices stay consistent
+  }
+}
+
+// Fills the READ Info block the app pulls once on connect: its clock anchor (boot_id + current
+// uptime, so it can back-compute each record's wall-clock) plus the ring's index range and the
+// overflow count (so it can mark a gap rather than assume continuity). 20 bytes, all LE u32.
+void backlogFillInfo() {
+  if (backlogInfoChar == nullptr) return;
+  uint32_t oldest = (backlogHead > LOG_RING_SIZE) ? (backlogHead - LOG_RING_SIZE) : 0;
+  uint8_t info[20];
+  putLE32(info + 0,  backlogBootId);
+  putLE32(info + 4,  (uint32_t)(esp_timer_get_time() / 1000000));  // current uptime, seconds
+  putLE32(info + 8,  oldest);             // smallest record_index still in the ring
+  putLE32(info + 12, backlogHead);        // one past the newest record_index
+  putLE32(info + 16, backlogOverflow);    // records overwritten before being drained
+  backlogInfoChar->setValue(info, sizeof(info));
+}
+
+// Streams every still-present ring record over the Data NOTIFY characteristic (one 16-byte record
+// per notification — fits the 23-byte default ATT MTU, no fragmentation), oldest first, then a
+// terminator (record_index = 0xFFFFFFFF) so the app knows the drain completed. Called from loop()
+// on the rising edge of a Data-char subscription (mirrors the NUS boot-summary-on-subscribe). The
+// app dedups by (mac, record_index) with INSERT OR IGNORE, so re-streaming the whole ring on every
+// reconnect is harmless — which is why no app→device cursor/ack write is needed.
+void backlogStreamAll() {
+  if (backlogDataChar == nullptr || !deviceConnected) return;
+  uint32_t oldest = (backlogHead > LOG_RING_SIZE) ? (backlogHead - LOG_RING_SIZE) : 0;
+  for (uint32_t idx = oldest; idx < backlogHead; idx++) {
+    uint8_t *rec = backlogRing + (idx % LOG_RING_SIZE) * LOG_RECORD_BYTES;  // from RAM, no flash reads
+    if (rec[0] == 0 && rec[1] == 0 && rec[2] == 0 && rec[3] == 0) continue;  // empty slot (boot_id 0)
+    backlogDataChar->setValue(rec, LOG_RECORD_BYTES);
+    backlogDataChar->notify();
+    if (!deviceConnected) return;                 // client vanished mid-stream — stop touching a dead link
+    esp_task_wdt_reset();                          // a long ring shouldn't starve the watchdog
+  }
+  uint8_t term[LOG_RECORD_BYTES] = {0};
+  putLE32(term + 4, 0xFFFFFFFF);                   // terminator: record_index = 0xFFFFFFFF
+  backlogDataChar->setValue(term, LOG_RECORD_BYTES);
+  backlogDataChar->notify();
 }
 
 // Human-readable reset cause, so the serial log shows whether the last reboot was a
@@ -312,8 +463,9 @@ bool selfTestWiring() {
         // whose OUT reaches D0 can produce it, so this confirms all three wires at once.
         emitLogf("[selftest] PASS: magnet detected — GND, V and OUT all wired correctly");
         wiringResult = WIRING_PASS;
-        // Let the line return HIGH before setup() arms the FALLING-edge ISR, so a still-present
-        // magnet doesn't cost the first revolution (FALLING needs a HIGH→LOW transition).
+        // Wait for the line to return HIGH before continuing. (The ISR is now armed before this
+        // self-test, so this no longer protects the "first revolution"; it just avoids the confirming
+        // magnet wave registering as extra edges while it's still held against the sensor.)
         unsigned long clearStart = millis();
         while (digitalRead(SENSOR_PIN) == LOW && millis() - clearStart < 2000) delay(2);
         blinkLed(3, 120, 180);  // 3 flashes = wiring confirmed
@@ -455,18 +607,35 @@ void setup() {
   logChar->addDescriptor(logCccd);
   logService->start();
 
+  // Backlog service: lets the app recover revolutions logged while disconnected (across reboots).
+  // Info (READ) carries the clock anchor + ring range, refreshed per-read; Data (NOTIFY) streams the
+  // ring on subscribe. Not advertised — discovered by service discovery like NUS. (1 service + 2
+  // chars + 1 CCCD ≈ 6 handles, under the 15-handle default.) backlogInit() must precede any read.
+  backlogInit();
+  BLEService *backlogService = server->createService(BACKLOG_SERVICE_UUID);
+  backlogInfoChar = backlogService->createCharacteristic(BACKLOG_INFO_UUID, BLECharacteristic::PROPERTY_READ);
+  backlogInfoChar->setCallbacks(new BacklogInfoCallbacks());
+  backlogFillInfo();                   // seed an initial value (refreshed on each read)
+  backlogDataChar = backlogService->createCharacteristic(BACKLOG_DATA_UUID, BLECharacteristic::PROPERTY_NOTIFY);
+  backlogDataCccd = new BLE2902();     // polled in loop() to edge-detect a subscriber, like logCccd
+  backlogDataChar->addDescriptor(backlogDataCccd);
+  backlogService->start();
+
   // Advertise using the 16-bit CSC service UUID so cycling apps can discover it
   BLEAdvertising *advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(BLEUUID((uint16_t)0x1816));
   advertising->setScanResponse(true);
   advertising->start();
 
-  // Boot wiring self-test before the ISR is attached and the watchdog armed: flashes the
-  // LED 3x if a magnet pass proves the hall sensor's GND/V/OUT wiring. Polls the pin directly
-  // (leaves wheelRevolutions untouched) and an inconclusive result still boots normally.
-  selfTestWiring();
-
+  // Attach the wheel ISR BEFORE the (up-to-8 s) wiring self-test so revolutions during the boot
+  // window are counted: a unit that reboots mid-ride (brownout / power-bank glitch) would otherwise
+  // silently drop up to ~8 s of distance that the backlog can never recover. The self-test polls the
+  // pin directly so it still works; the only effect is its confirming magnet wave adds a rev or two.
   attachInterrupt(digitalPinToInterrupt(SENSOR_PIN), onMagnet, FALLING);
+
+  // Boot wiring self-test: flashes the LED 3x if a magnet pass proves the hall sensor's GND/V/OUT
+  // wiring. Inconclusive (no magnet waved) still boots normally.
+  selfTestWiring();
 
   // Arm the watchdog last, once BLE is up and the ISR is attached.
   setupWatchdog();
@@ -502,6 +671,15 @@ void loop() {
   }
   prevLogSub = nowLogSub;
 
+  // On the rising edge of a client subscribing to the backlog Data characteristic, stream the whole
+  // NVS ring (then a terminator). Mirrors the NUS boot-summary replay: edge-detected by polling the
+  // CCCD bit, so it re-fires for each fresh subscriber after a reconnect. The app dedups records by
+  // (mac, record_index) with INSERT OR IGNORE, so re-streaming the ring every reconnect is harmless.
+  static bool prevBacklogSub = false;
+  bool nowBacklogSub = deviceConnected && backlogDataCccd != nullptr && backlogDataCccd->getNotifications();
+  if (nowBacklogSub && !prevBacklogSub) backlogStreamAll();
+  prevBacklogSub = nowBacklogSub;
+
   // Drain every buffered revolution (one CSC notification each, so a burst is never
   // collapsed into one packet). Read rbHead with acquire to pair with the ISR's release.
   // Notify only when a client is connected; otherwise discard — the cumulative count
@@ -533,6 +711,28 @@ void loop() {
   // before a reset (a cheap RTC-RAM write; see the rtcBootMagic diagnostic above).
   rtcPrevUptimeS = nowMs / 1000;
 
+  // Commit the NEXT boot_id once this run has proven stable, so a brownout/power-bank reboot loop
+  // (which dies before this) reuses the same boot_id and can't burn NVS wear on a failing supply.
+  if (!backlogBootIdCommitted && nowMs >= (unsigned long)LOG_BOOTID_STABLE_S * 1000) {
+    backlogPrefs.putUInt("bootId", backlogBootId + 1);
+    backlogBootIdCommitted = true;
+  }
+
+  // Per-minute backlog: once a minute, IF the wheel count advanced since the last record, append one
+  // record to the NVS ring. Only-when-advanced skips idle/parked minutes (no wear, no noise). Straddle
+  // the flash write with watchdog feeds since an NVS page compaction can run long. From loop(), never
+  // the ISR. uptime is taken from esp_timer (64-bit, wrap-free) to match the Info block's anchor.
+  static unsigned long lastLog = 0;
+  if (nowMs - lastLog >= LOG_INTERVAL_MS) {
+    lastLog = nowMs;
+    uint32_t revs = wheelRevolutions;            // single aligned load; may advance after, never torn
+    if (revs > lastLoggedRevs) {                 // only log minutes that actually moved
+      esp_task_wdt_reset();
+      backlogWrite(revs, (uint32_t)(esp_timer_get_time() / 1000000));
+      esp_task_wdt_reset();
+    }
+  }
+
   // Early boot heartbeat: until the first HEALTH_INTERVAL_MS health line, tick uptime once per
   // second so a unit that dies within "a few seconds" (a power-bank auto-shutoff or brownout)
   // still leaves a trail of how long it ran — the first full health line only appears at 5 s.
@@ -562,10 +762,13 @@ void loop() {
     // emitLogf mirrors this to USB serial AND (when subscribed) over BLE; no trailing '\n'
     // in the format — emitLogf adds it for both sinks.
     emitLogf(
-      "[health] up=%lus revs=%lu rate=%.1f/s drops=%lu hwm=%u/%u notif=%lu conn=%d disc=%lu heap=%lu",
+      "[health] up=%lus revs=%lu rate=%.1f/s drops=%lu drej=%lu hwm=%u/%u notif=%lu conn=%d disc=%lu "
+      "boot=%lu log=%lu ovf=%lu nvserr=%lu heap=%lu",
       nowMs / 1000, (unsigned long)revs, rate, (unsigned long)droppedRevolutions,
-      rbHighWater, RB_SIZE - 1, (unsigned long)notificationsSent,
-      deviceConnected ? 1 : 0, (unsigned long)disconnectCount, (unsigned long)ESP.getFreeHeap());
+      (unsigned long)debouncedRejects, rbHighWater, RB_SIZE - 1, (unsigned long)notificationsSent,
+      deviceConnected ? 1 : 0, (unsigned long)disconnectCount, (unsigned long)backlogBootId,
+      (unsigned long)backlogHead, (unsigned long)backlogOverflow, (unsigned long)backlogNvsErr,
+      (unsigned long)ESP.getFreeHeap());
   }
 
   // Status LED (active low): solid = a client is connected, ~1 Hz blink = advertising.

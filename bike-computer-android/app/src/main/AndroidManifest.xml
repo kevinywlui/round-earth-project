@@ -11,7 +11,11 @@
     <!-- BLE on Android 11 and below -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />
+
+    <!-- Fine location: required pre-31 for BLE scanning, and on all versions for the optional GPS
+         anchoring log (best-effort — collection works without it). Granted while-in-use via the
+         foreground service. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <!-- Optional: one-shot last-known location to auto-detect magnetic declination.
          Independent of BLE scanning, which is flagged neverForLocation above. -->
@@ -24,6 +28,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep the CPU awake during a ride so the once-a-minute heading sampler isn't frozen by Doze. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 

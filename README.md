@@ -11,8 +11,11 @@ A homemade bike computer in two halves: a DIY **wheel-speed sensor** and the
 - **[`bike-computer-android/`](bike-computer-android/)** — Kotlin + Jetpack
   Compose app. Connects to one CSC sensor, records a **lossless** per-revolution
   time-series in Room, and shows speed, odometer, and a magnetic + true-north
-  compass. See its [`docs/`](bike-computer-android/docs/) for the heading and
-  true-north design notes.
+  compass. It also recovers revolutions ridden while disconnected from the
+  sensor's on-device **backlog**, keeps a per-minute heading timeline, and
+  reconstructs a 2-D (north/east) **displacement**. See its
+  [`docs/`](bike-computer-android/docs/) for the heading, true-north, offline-timing,
+  and backlog/displacement design notes.
 
 For the design as a whole — the dumb-sensor / smart-app split, the lossless data
 model, the three-clock timing model, and the concurrency and BLE-resilience

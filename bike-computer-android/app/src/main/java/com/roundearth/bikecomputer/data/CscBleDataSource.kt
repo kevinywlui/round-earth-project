@@ -58,6 +58,18 @@ data class DiscoveredSensor(
 )
 
 /**
+ * A drained per-minute backlog from the sensor: the records streamed over the Backlog Data
+ * characteristic, plus the [BacklogRecordParser.Info] block and the wall-clock captured at the moment
+ * the Info block was read (the anchor used to back-compute each record's wall-clock).
+ */
+data class BacklogBatch(
+    val sensorMac: String,
+    val anchorWallClockMs: Long,
+    val info: BacklogRecordParser.Info,
+    val records: List<BacklogRecordParser.Record>,
+)
+
+/**
  * Connects to a single CSC (Cycling Speed and Cadence) sensor over BLE, subscribes
  * to its wheel-revolution notifications, and turns them into both live dashboard
  * values and raw [WheelRevolutionReading]s for persistence.
@@ -80,6 +92,8 @@ class CscBleDataSource(
     private val declination: () -> Float = { 0f },
     /** Address of the sensor the user has chosen to connect to (null if none). */
     private val pairedSensor: Flow<String?> = MutableStateFlow(null),
+    /** Invoked once per connection after the sensor's per-minute backlog has been drained. */
+    private val onBacklogBatch: (BacklogBatch) -> Unit = {},
 ) : BikeDataSource {
 
     // Process-lifetime scope by design (this is an Application-scoped singleton); it is
@@ -520,6 +534,14 @@ class CscBleDataSource(
         private var awaitingNusCccd = false
         private val fwLogBuffer = StringBuilder()
 
+        // Backlog drain state. The Info read (the 5th, last step of the connect chain) captures the
+        // clock anchor; the Data CCCD write then makes the firmware stream the ring; records arrive as
+        // notifications and accumulate until the terminator, when the whole batch is handed off.
+        private var awaitingBacklogCccd = false
+        private var backlogAnchorMs = 0L
+        private var backlogInfo: BacklogRecordParser.Info? = null
+        private val backlogRecords = ArrayList<BacklogRecordParser.Record>()
+
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
@@ -565,6 +587,15 @@ class CscBleDataSource(
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            // Last write in the chain: the optional Backlog Data CCCD. Subscribing makes the firmware
+            // stream its ring as notifications (handled in handleBacklogRecord); nothing else chains
+            // after, so just log the outcome. Best-effort — older firmware has no backlog service.
+            if (awaitingBacklogCccd) {
+                awaitingBacklogCccd = false
+                if (status == BluetoothGatt.GATT_SUCCESS) Diag.i(TAG, "subscribed to backlog on $address")
+                else Diag.w(TAG, "backlog CCCD write failed for $address (status=$status); no backlog this connection")
+                return
+            }
             // Second write in the chain: the optional NUS log-channel CCCD. It is best-effort —
             // whatever its outcome, proceed to the optional reads. (Routed by flag, not by the
             // descriptor argument, which the connection tests drive with a throwaway mock.)
@@ -629,10 +660,40 @@ class CscBleDataSource(
             }
         }
 
-        /** Reads the optional DIS firmware revision; logs if the sensor has no such characteristic. */
+        /** Reads the optional DIS firmware revision; if absent, chains straight to the backlog read. */
         private fun readFirmwareRevision(g: BluetoothGatt) {
             if (!startRead(g, DIS_SERVICE_UUID, FIRMWARE_REVISION_UUID)) {
                 Diag.w(TAG, "no firmware-revision characteristic to read on $address")
+                readBacklogInfo(g)
+            }
+        }
+
+        /**
+         * Reads the optional Backlog Info block (last step of the connect chain). Capturing the
+         * wall-clock here pairs it with the Info block's currentUptimeSeconds as the single anchor
+         * for back-computing every record's wall-clock. If the sensor has no backlog service (older
+         * firmware), the read doesn't start and the chain simply ends.
+         */
+        private fun readBacklogInfo(g: BluetoothGatt) {
+            if (!startRead(g, BACKLOG_SERVICE_UUID, BACKLOG_INFO_UUID)) {
+                Diag.i(TAG, "no backlog service on $address (older firmware)")
+            }
+        }
+
+        /** Subscribes to the Backlog Data characteristic so the firmware streams its ring. */
+        private fun subscribeBacklogData(g: BluetoothGatt): Boolean {
+            val dataCh = g.getService(BACKLOG_SERVICE_UUID)?.getCharacteristic(BACKLOG_DATA_UUID) ?: return false
+            g.setCharacteristicNotification(dataCh, true)
+            val cccd = dataCh.getDescriptor(CCCD_UUID) ?: return false
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                    BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                run {
+                    cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    g.writeDescriptor(cccd)
+                }
             }
         }
 
@@ -675,11 +736,26 @@ class CscBleDataSource(
                     // never starts a read) leaves firmwareRevision null; log so the two cases
                     // are distinguishable. It refills on the next reconnect, so no retry.
                     else Diag.w(TAG, "firmware-revision read for $address failed: status=$status")
+                    readBacklogInfo(g) // chain regardless of the firmware-revision outcome
                 }
-                // Only the two reads above are ever issued. An unexpected UUID here means a
-                // future read was added without a matching arm to kick the next step. The log
-                // surfaces the mistake; the chain still stops here, so the new read must add its
-                // own arm that kicks whatever should follow it.
+                BACKLOG_INFO_UUID -> {
+                    // Capture the anchor (wall-clock now ↔ info.currentUptimeSeconds) at THIS instant,
+                    // then subscribe so the firmware streams the ring. Derive each record's wall-clock
+                    // once from this snapshot (survives a later NTP jump). End of chain either way.
+                    val info = if (status == BluetoothGatt.GATT_SUCCESS) BacklogRecordParser.parseInfo(value ?: ByteArray(0)) else null
+                    if (info != null) {
+                        backlogInfo = info
+                        backlogAnchorMs = System.currentTimeMillis()
+                        backlogRecords.clear()
+                        if (subscribeBacklogData(g)) awaitingBacklogCccd = true
+                        else Diag.w(TAG, "backlog info read but Data subscribe didn't start on $address")
+                    } else {
+                        Diag.w(TAG, "backlog info read for $address failed/short: status=$status")
+                    }
+                }
+                // The reads above are the only ones issued. An unexpected UUID here means a future
+                // read was added without a matching arm to kick the next step. The log surfaces the
+                // mistake; the chain still stops here, so the new read must add its own arm.
                 else -> Diag.w(TAG, "unexpected characteristic read for $address: $uuid")
             }
         }
@@ -690,6 +766,7 @@ class CscBleDataSource(
             when (c.uuid) {
                 CSC_MEASUREMENT_UUID -> handleMeasurement(c.value)
                 NUS_TX_UUID -> handleLogBytes(c.value)
+                BACKLOG_DATA_UUID -> handleBacklogRecord(c.value)
             }
         }
 
@@ -698,7 +775,29 @@ class CscBleDataSource(
             when (c.uuid) {
                 CSC_MEASUREMENT_UUID -> handleMeasurement(value)
                 NUS_TX_UUID -> handleLogBytes(value)
+                BACKLOG_DATA_UUID -> handleBacklogRecord(value)
             }
+        }
+
+        /**
+         * Accumulates streamed backlog records until the terminator, then hands the whole batch (with
+         * the connect-time anchor + Info block) to [onBacklogBatch] for idempotent persistence. Dropped
+         * for a torn-down/replaced connection (same identity gate as handleMeasurement).
+         */
+        private fun handleBacklogRecord(bytes: ByteArray?) {
+            if (bytes == null || connection.get() !== this) return
+            if (BacklogRecordParser.isTerminator(bytes)) {
+                val info = backlogInfo
+                // Always clear, even with no Info (a stray stream): never leave records to accumulate.
+                val records = backlogRecords.toList()
+                backlogRecords.clear()
+                if (info != null) onBacklogBatch(BacklogBatch(address, backlogAnchorMs, info, records))
+                return
+            }
+            // Bound the buffer so a firmware that never sends a terminator can't grow it without limit
+            // (mirrors fwLogBuffer's cap). The firmware ring is small; this is purely a safety ceiling.
+            if (backlogRecords.size >= MAX_BACKLOG_RECORDS) return
+            BacklogRecordParser.parseRecord(bytes)?.let { backlogRecords.add(it) }
         }
 
         /**
@@ -778,6 +877,9 @@ class CscBleDataSource(
     companion object {
         private const val TAG = "CscBleDataSource"
         private const val STALE_MS = 2_500L
+        // Safety ceiling on a single connection's backlog buffer (the firmware ring is far smaller);
+        // guards against a misbehaving stream that never terminates.
+        private const val MAX_BACKLOG_RECORDS = 4_096
         // Minimum heading change (degrees) that warrants a live update.
         private const val HEADING_EPSILON_DEG = 1f
 
@@ -790,6 +892,12 @@ class CscBleDataSource(
         // subscribe to the TX (notify) characteristic; the RX direction is unused.
         private val NUS_SERVICE_UUID = UUID.fromString("6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
         private val NUS_TX_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+
+        // Backlog service (custom; see speed.ino). Info (READ) = clock anchor + ring range; Data
+        // (NOTIFY) streams the per-minute ring on subscribe. Not advertised — found by discovery.
+        private val BACKLOG_SERVICE_UUID = UUID.fromString("5245424C-0000-1000-8000-00805f9b34fb")
+        private val BACKLOG_INFO_UUID = UUID.fromString("52454201-0000-1000-8000-00805f9b34fb")
+        private val BACKLOG_DATA_UUID = UUID.fromString("52454202-0000-1000-8000-00805f9b34fb")
 
         /**
          * Whether a CSC Feature value (16-bit little-endian, characteristic 0x2A5C) advertises

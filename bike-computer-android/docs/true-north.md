@@ -26,11 +26,21 @@ and every recorded revolution stores both headings.
   using wrap-aware `angularDistance` so the 0/360 boundary doesn't churn).
 - **Storage:** `RevolutionEvent` stores both `headingDegrees` (magnetic) and
   `trueHeadingDegrees`, and CSV export carries a `true_heading_degrees` column.
-  There is no hand-written Room migration: schema changes use
-  `fallbackToDestructiveMigration()` (a version bump wipes history on purpose —
-  this is a single-user app), so don't expect old rides to survive a schema
-  change. Declination is still recoverable per-row as `true − magnetic`, so the
-  stored data is lossless even though declination is a mutable preference.
+  The **per-minute `heading_minutes`** timeline (see
+  [live-heading.md](live-heading.md)) applies the same magnetic + true pairing to
+  the per-minute compass log: each minute keeps its circular-mean magnetic heading
+  *and* the true heading derived with the declination at write time, so
+  declination stays recoverable per-row as `true − magnetic` there too, and a
+  later declination correction never rewrites stored minutes. Declination is
+  recoverable per-row as `true − magnetic`, so the stored data is lossless even
+  though declination is a mutable preference.
+- **Migrations:** schema changes *used* to always use
+  `fallbackToDestructiveMigration()`, wiping history on a version bump. That is now
+  only the *fallback*: the additive `7 → 8` bump (which adds the `backlog_minutes`,
+  `heading_minutes`, and `gps_fixes` tables) is a real, hand-written migration that
+  **preserves recorded rides** — durable history is the whole point of those
+  tables. Destructive fallback remains the last resort for a future *incompatible*
+  change. See [ARCHITECTURE.md](../../ARCHITECTURE.md) → *Deliberate non-goals*.
 
 ## Why manual, not solar declination
 

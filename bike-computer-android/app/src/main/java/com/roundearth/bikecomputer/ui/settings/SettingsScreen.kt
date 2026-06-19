@@ -134,6 +134,30 @@ fun SettingsScreen(
         )
     }
 
+    // The per-minute 2-D displacement timeline (distance + north/east per minute).
+    val saveDisplacementLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        viewModel.saveDisplacementCsv(
+            open = { context.contentResolver.openOutputStream(uri) },
+            onDone = { Toast.makeText(context, "Saved displacement.csv", Toast.LENGTH_SHORT).show() },
+            onError = { Toast.makeText(context, "Save failed", Toast.LENGTH_SHORT).show() },
+        )
+    }
+
+    // GPS fixes — a SEPARATE download (raw coordinates, kept out of the ride-telemetry CSV).
+    val saveGpsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        viewModel.saveGpsCsv(
+            open = { context.contentResolver.openOutputStream(uri) },
+            onDone = { Toast.makeText(context, "Saved gps-fixes.csv", Toast.LENGTH_SHORT).show() },
+            onError = { Toast.makeText(context, "Save failed", Toast.LENGTH_SHORT).show() },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -408,6 +432,23 @@ fun SettingsScreen(
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
                     border = BorderStroke(1.dp, Divider),
                 ) { Text("SAVE CSV", fontSize = 12.sp) }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { saveDisplacementLauncher.launch("displacement.csv") },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                    border = BorderStroke(1.dp, Divider),
+                ) { Text("SAVE N/E", fontSize = 12.sp) }
+
+                OutlinedButton(
+                    onClick = { saveGpsLauncher.launch("gps-fixes.csv") },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Green),
+                    border = BorderStroke(1.dp, Divider),
+                ) { Text("SAVE GPS", fontSize = 12.sp) }
             }
 
             Spacer(Modifier.height(8.dp))

@@ -104,6 +104,9 @@ class BikePersistenceTest {
             source = source,
             prefs = PreferencesStore(ApplicationProvider.getApplicationContext()),
             dao = dao,
+            backlogDao = db.backlogMinuteDao(),
+            headingDao = db.headingMinuteDao(),
+            gpsDao = db.gpsFixDao(),
             scope = scope,
         )
 
