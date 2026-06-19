@@ -84,7 +84,7 @@ class SimulatedCscDevice(
     /** A clean connect → discover(healthy) → subscribe, leaving the source CONNECTED. */
     fun subscribeHealthy(): SimulatedCscDevice = connected().discovered(GattGraph.healthy()).confirmCccd()
 
-    /** Deliver one wheel-revolution measurement notification (the API-34 ByteArray overload). */
+    /** Deliver one wheel-revolution measurement notification (the API 33+/Tiramisu ByteArray overload). */
     fun notify(revs: Long, time: Int): SimulatedCscDevice = apply {
         callback().onCharacteristicChanged(gatt, measurementChar(), wheelPacket(revs, time))
     }
@@ -139,6 +139,8 @@ class SimulatedCscDevice(
             fun missingMeasurementChar() = GattGraph(measurementChar = false)
             /** Measurement present but its 0x2902 CCCD descriptor is absent (bug #4). */
             fun missingCccd() = GattGraph(cccd = false)
+            /** Empty service table — getService(CSC) is null, as after a failed discovery (bug #5). */
+            fun noService() = GattGraph(cscService = false)
         }
     }
 

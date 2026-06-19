@@ -133,8 +133,10 @@ class CscSimulatedDeviceE2eTest {
     fun failedDiscoveryStatus_recoversInsteadOfWedgingForever() {
         sim.scanSighting()
         val cb = sim.callback()
-        // status 129 = GATT_INTERNAL_ERROR; no service stubbed so getService(CSC) is null.
-        sim.connected().discovered(GattGraph.missingMeasurementChar(), status = 129)
+        // status 129 = GATT_INTERNAL_ERROR with an empty service table (noService -> getService(CSC)
+        // is null). The status guard drops the link before discovery is even inspected; even without
+        // it, the null table would fall into the same measurement==null wedge.
+        sim.connected().discovered(GattGraph.noService(), status = 129)
 
         verify(sim.gatt).disconnect()
         assertNotEquals(ConnectionState.CONNECTED, source.connectionState.value)
