@@ -29,7 +29,13 @@ reports **magnetic** north.
   setting (manual, or auto-detected from location) converts magnetic to true.
 - **Mounting offset:** `applyMountingOffset` (in `Heading.kt`) corrects for how
   the phone sits on the mount; calibrate it from Settings.
-- **Sensor lifecycle:** `HeadingProvider` is tied to the app foreground —
-  `BikeApplication` registers a `ProcessLifecycleOwner` observer that
-  start()s/stop()s it (and the BLE source) on foreground/background to save
-  power.
+- **Sensor lifecycle:** `HeadingProvider` is owned by `CollectionService`, the
+  foreground service that runs a ride, via `BikeApplication.startCollection()` /
+  `stopCollection()` — **not** the app foreground. It deliberately runs for the
+  whole ride (including while backgrounded or with the screen off), so every
+  revolution recorded in the background still gets a real heading and the
+  northward reconstruction stays intact; it stops only when collection ends. (An
+  earlier design tore it down — along with the BLE source — on a
+  `ProcessLifecycleOwner` background callback to save power, but that lost the
+  heading on every background revolution.) See
+  [ARCHITECTURE.md](../../ARCHITECTURE.md) → *Collection outlives the UI*.

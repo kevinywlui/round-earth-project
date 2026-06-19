@@ -1,9 +1,6 @@
 package com.roundearth.bikecomputer
 
 import android.app.Application
-import androidx.lifecycle.DefaultLifecycleObserver
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ProcessLifecycleOwner
 import com.roundearth.bikecomputer.data.BikeRepository
 import com.roundearth.bikecomputer.data.CscBleDataSource
 import com.roundearth.bikecomputer.data.HeadingProvider
@@ -65,20 +62,30 @@ class BikeApplication : Application() {
         appScope.launch {
             prefs.headingOffsetDeg.collect { headingOffsetDeg = it.toFloat() }
         }
-        // Stop scanning/connections AND the magnetometer in the background (battery; Android
-        // also throttles a long-running low-latency scan) and resume on return to the
-        // foreground. The BLE source only resumes if recording was already started, so it
-        // never pre-empts the permission request on first launch.
-        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) {
-                headingProvider.start()
-                repository.onForeground()
-            }
+    }
 
-            override fun onStop(owner: LifecycleOwner) {
-                repository.onBackground()
-                headingProvider.stop()
-            }
-        })
+    /**
+     * Begins (or resumes) collection: the magnetometer and the BLE recording pipeline. Called by
+     * [CollectionService] so both run for the whole ride — including while the app is backgrounded
+     * or the screen is off — rather than being torn down the moment the UI stops.
+     *
+     * Idempotent: [BikeRepository.start] no-ops a second recording job, and [HeadingProvider.start]
+     * de-dupes its sensor listener, so a sticky service restart can safely re-enter this. Keeping
+     * the magnetometer running here (not gated on UI visibility) is what stamps a real heading on
+     * every revolution recorded in the background, so the northward reconstruction stays intact.
+     */
+    fun startCollection() {
+        headingProvider.start()
+        repository.start()
+    }
+
+    /**
+     * Ends collection: stops the BLE source and the magnetometer. The recording job is left idle
+     * (not cancelled) so a later [startCollection] resumes the ride rather than re-seeding the
+     * odometer from zero.
+     */
+    fun stopCollection() {
+        repository.onBackground()
+        headingProvider.stop()
     }
 }

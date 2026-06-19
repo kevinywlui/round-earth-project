@@ -161,7 +161,7 @@ class CscBleDataSource(
         connection.get()?.let { it.address == address && it.ready } == true
 
     override fun start() {
-        if (wantRunning) return // idempotent: onForeground() may re-enter while already live
+        if (wantRunning) return // idempotent: a sticky service restart may re-enter while already live
         wantRunning = true
 
         // These don't depend on the Bluetooth adapter, and the receiver must be live so a
@@ -377,8 +377,8 @@ class CscBleDataSource(
      * an unsolicited drop. Android's [BluetoothGatt.close] only releases the local client handle —
      * it does NOT terminate the radio link, so a bare close() strands the peer "connected" to
      * nobody: the sensor keeps its ACL up (firmware reports conn=1, disc=0) until its own
-     * supervision timeout fires. The next foreground then opens a fresh client and re-attaches over
-     * that still-live link — the firmware logs no new connect/disconnect — and the orphaned link
+     * supervision timeout fires. The next collection start then opens a fresh client and re-attaches
+     * over that still-live link — the firmware logs no new connect/disconnect — and the orphaned link
      * eventually dies with a status=8 GATT_CONN_TIMEOUT. disconnect() first asks the stack to drop
      * the ACL so the sensor sees a clean disconnect and can re-advertise; close() then frees the
      * client. (The unsolicited-drop path in onConnectionStateChange runs AFTER the link is already

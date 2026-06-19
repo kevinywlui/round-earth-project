@@ -1,3 +1,11 @@
 <resources>
     <string name="app_name">Bike Computer</string>
+
+    <!-- Foreground collection service notification -->
+    <string name="collection_channel_name">Ride collection</string>
+    <string name="collection_notification_title">Recording ride</string>
+    <string name="collection_notification_starting">Starting…</string>
+    <!-- distance, distance-unit, speed, speed-unit -->
+    <string name="collection_notification_text">%1$.2f %2$s · %3$.1f %4$s</string>
+    <string name="collection_notification_stop">Stop</string>
 </resources>

@@ -80,13 +80,11 @@ class BikeRepository(
         source.start()
     }
 
-    /** Releases the data source (scan/connections) when the app goes to the background. */
+    /**
+     * Stops the data source (scan/connections) when collection ends. The recording job is left
+     * intact, so a later [start] resumes the same session rather than re-seeding from zero.
+     */
     fun onBackground() = source.stop()
-
-    /** Resumes the data source on return to the foreground, only if already started. */
-    fun onForeground() {
-        if (recordingJob != null) source.start()
-    }
 
     /** A recent prior session is resumed; otherwise a new one begins now. */
     private suspend fun resolveSessionId(): Long {
