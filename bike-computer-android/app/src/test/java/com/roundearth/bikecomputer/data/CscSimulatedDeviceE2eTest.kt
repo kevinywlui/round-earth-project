@@ -1,5 +1,6 @@
 package com.roundearth.bikecomputer.data
 
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothGatt
 import androidx.test.core.app.ApplicationProvider
 import com.roundearth.bikecomputer.data.SimulatedCscDevice.GattGraph
@@ -142,6 +143,28 @@ class CscSimulatedDeviceE2eTest {
         assertNotEquals(ConnectionState.CONNECTED, source.connectionState.value)
 
         assertRecoversAfterDisconnect(cb)
+    }
+
+    /**
+     * Rank #2: a scan failure must reschedule scanning, not go silent. The historical bug left
+     * scanning dead for the whole process — start()'s wantRunning idempotency guard meant even a
+     * sticky service restart couldn't revive it, so only a Bluetooth toggle recovered. The fix arms
+     * a bounded retry; here scanning comes back on its own with no toggle and no restart.
+     */
+    @Test
+    fun scanFailure_reschedulesScanInsteadOfWedging() = runBlocking {
+        BluetoothAdapter.getDefaultAdapter().enable() // Robolectric adapter ON so start() scans
+        source.start()
+        assertEquals(ConnectionState.SCANNING, source.connectionState.value)
+
+        // The system scanner reports a failure (2 = SCAN_FAILED_APPLICATION_REGISTRATION_FAILED).
+        source.onScanFailedForTest(2)
+        assertEquals(ConnectionState.DISCONNECTED, source.connectionState.value)
+
+        // The bounded retry re-issues startScan within ~BASE_SCAN_RETRY_MS — no BT toggle, no
+        // collection restart. On the old code this never happened and the timeout would fire.
+        withTimeout(5_000) { while (source.connectionState.value != ConnectionState.SCANNING) delay(20) }
+        assertEquals(ConnectionState.SCANNING, source.connectionState.value)
     }
 
     /**
