@@ -569,13 +569,32 @@ class CscBleDataSource(
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+            // A failed discovery can leave an empty/partial service table; don't subscribe over it.
+            // Drop the half-open link so the DISCONNECTED handler below frees the slot and arms a
+            // backoff — otherwise the slot stays occupied (ready=false) forever and the app, whose
+            // only reconnect trigger is a fresh scan sighting that short-circuits on the non-null
+            // slot (connectIfNeeded's compareAndSet), never reconnects. Mirrors the CCCD-write-fail
+            // path in onDescriptorWrite, which already disconnects for exactly this reason.
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Diag.e(TAG, "service discovery failed for $address (status=$status); disconnecting")
+                g.disconnect()
+                return
+            }
             val measurement = g.getService(CSC_SERVICE_UUID)?.getCharacteristic(CSC_MEASUREMENT_UUID)
             if (measurement == null) {
-                Diag.e(TAG, "CSC measurement characteristic not found on $address")
+                // No usable CSC measurement characteristic (partial GATT cache, sensor mid-reflash):
+                // disconnect so scanning can reconnect, rather than wedging the slot forever.
+                Diag.e(TAG, "CSC measurement characteristic not found on $address; disconnecting")
+                g.disconnect()
                 return
             }
             g.setCharacteristicNotification(measurement, true)
-            val cccd = measurement.getDescriptor(CCCD_UUID) ?: return
+            val cccd = measurement.getDescriptor(CCCD_UUID) ?: run {
+                // Measurement present but no CCCD to enable notifications: same wedge risk, same fix.
+                Diag.e(TAG, "CCCD descriptor missing on $address; disconnecting")
+                g.disconnect()
+                return
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
             } else {
